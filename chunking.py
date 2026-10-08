@@ -7,9 +7,17 @@ one topic glued to the head of another. The heading path is prepended to
 each chunk's text, because a section body on its own ("Steps: 1. ...")
 often doesn't say what it is about - which hurts both retrieval and the
 LLM's reading of the context.
+
+PDFs have no headings to split on, so each page becomes a section
+("manual.pdf > s. 3"), which also makes citations point at a page.
+
+Metadata (title, type, priority, updated) comes from, in order of
+precedence: a sidecar "<file>.meta.json" (written by the upload UI, and the
+only option for PDFs), the document's front matter, then defaults.
 """
 
 import hashlib
+import json
 import re
 from dataclasses import dataclass
 from pathlib import Path
@@ -17,9 +25,10 @@ from pathlib import Path
 MAX_CHUNK_CHARS = 1200
 
 # When documents conflict, the higher priority wins (then the newer `updated`
-# date). Front matter can set `priority` explicitly; otherwise it follows the type.
+# date). Metadata can set `priority` explicitly; otherwise it follows the type.
 DEFAULT_PRIORITY = {"reference": 2, "example": 1}
-SUPPORTED_EXTENSIONS = (".md", ".txt")
+SUPPORTED_EXTENSIONS = (".md", ".txt", ".pdf")
+META_SUFFIX = ".meta.json"
 
 HEADING_PATTERN = re.compile(r"^(#{1,6})\s+(.*\S)\s*$")
 
@@ -95,62 +104,119 @@ def _sections(body: str) -> list[tuple[list[str], str]]:
     return sections
 
 
-def chunk_document(text: str, source: str, max_chars: int = MAX_CHUNK_CHARS) -> list[Chunk]:
-    """Split a document into heading-scoped chunks of at most ~max_chars body text.
+def _pack(paragraphs: list[str], max_chars: int) -> list[str]:
+    """Pack paragraphs into pieces of at most ~max_chars, splitting over-long ones."""
+    pieces, current = [], ""
+    for paragraph in paragraphs:
+        parts = _split_long(paragraph, max_chars) if len(paragraph) > max_chars else [paragraph]
+        for part in parts:
+            if current and len(current) + 2 + len(part) > max_chars:
+                pieces.append(current)
+                current = part
+            else:
+                current = f"{current}\n\n{part}" if current else part
+    if current:
+        pieces.append(current)
+    return pieces
+
+
+def _resolve_meta(meta: dict, source: str) -> dict:
+    doc_type = meta.get("type", "unknown")
+    try:
+        priority = int(meta["priority"])
+    except (KeyError, TypeError, ValueError):
+        priority = DEFAULT_PRIORITY.get(doc_type, 1)
+    return {
+        "title": meta.get("title") or source,
+        "doc_type": doc_type,
+        "priority": priority,
+        "updated": str(meta.get("updated", "")),
+    }
+
+
+def _make_chunks(sections: list[tuple[str, list[str]]], source: str, meta: dict, max_chars: int) -> list[Chunk]:
+    chunks = []
+    for section, paragraphs in sections:
+        for i, piece in enumerate(_pack(paragraphs, max_chars)):
+            chunk_id = hashlib.sha1(f"{source}|{section}|{i}".encode("utf-8")).hexdigest()[:16]
+            chunks.append(Chunk(id=chunk_id, text=f"{section}\n\n{piece}", source=source, section=section, **meta))
+    return chunks
+
+
+def chunk_document(text: str, source: str, max_chars: int = MAX_CHUNK_CHARS, overrides: dict = None) -> list[Chunk]:
+    """Split a Markdown/text document into heading-scoped chunks of at most ~max_chars body text.
 
     Paragraphs are packed together up to max_chars but never across a
     section boundary. Plain-text files (no headings) become one section
     titled after the document.
     """
-    meta, body = parse_front_matter(text)
-    title = meta.get("title", source)
-    doc_type = meta.get("type", "unknown")
+    front_matter, body = parse_front_matter(text)
+    meta = _resolve_meta({**front_matter, **(overrides or {})}, source)
+    sections = [
+        (" > ".join(heading_path) or meta["title"], [p.strip() for p in section_body.split("\n\n") if p.strip()])
+        for heading_path, section_body in _sections(body)
+    ]
+    return _make_chunks(sections, source, meta, max_chars)
+
+
+def chunk_pdf(path: Path, source: str, max_chars: int = MAX_CHUNK_CHARS, overrides: dict = None) -> list[Chunk]:
+    """Split a PDF into page-scoped chunks ("<title> > s. <page>").
+
+    Only the text layer is read: a scanned PDF without one yields no chunks
+    (it would need OCR first).
+    """
+    from pypdf import PdfReader
+
+    reader = PdfReader(str(path))
+    pdf_title = (reader.metadata.title if reader.metadata else None) or Path(source).stem
+    meta = _resolve_meta({"title": pdf_title, **(overrides or {})}, source)
+
+    sections = []
+    for page_number, page in enumerate(reader.pages, start=1):
+        text = (page.extract_text() or "").replace("\r", "")
+        # PDF text often has hard line breaks inside paragraphs; keep blank-line breaks only
+        paragraphs = [re.sub(r"\s*\n\s*", " ", p).strip() for p in re.split(r"\n\s*\n", text)]
+        paragraphs = [p for p in paragraphs if p]
+        if paragraphs:
+            sections.append((f"{meta['title']} > s. {page_number}", paragraphs))
+    return _make_chunks(sections, source, meta, max_chars)
+
+
+def read_sidecar(path: Path) -> dict:
+    sidecar = path.with_name(path.name + META_SUFFIX)
+    if not sidecar.exists():
+        return {}
     try:
-        priority = int(meta["priority"])
-    except (KeyError, ValueError):
-        priority = DEFAULT_PRIORITY.get(doc_type, 1)
-    updated = meta.get("updated", "")
-
-    chunks = []
-    for heading_path, section_body in _sections(body):
-        section = " > ".join(heading_path) or title
-        paragraphs = [p.strip() for p in section_body.split("\n\n") if p.strip()]
-
-        pieces, current = [], ""
-        for paragraph in paragraphs:
-            parts = _split_long(paragraph, max_chars) if len(paragraph) > max_chars else [paragraph]
-            for part in parts:
-                if current and len(current) + 2 + len(part) > max_chars:
-                    pieces.append(current)
-                    current = part
-                else:
-                    current = f"{current}\n\n{part}" if current else part
-        if current:
-            pieces.append(current)
-
-        for i, piece in enumerate(pieces):
-            chunk_id = hashlib.sha1(f"{source}|{section}|{i}".encode("utf-8")).hexdigest()[:16]
-            chunks.append(
-                Chunk(
-                    id=chunk_id,
-                    text=f"{section}\n\n{piece}",
-                    source=source,
-                    section=section,
-                    title=title,
-                    doc_type=doc_type,
-                    priority=priority,
-                    updated=updated,
-                )
-            )
-    return chunks
+        return json.loads(sidecar.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
 
 
 def document_paths(docs_dir: Path) -> list[Path]:
-    return sorted(p for p in Path(docs_dir).iterdir() if p.suffix.lower() in SUPPORTED_EXTENSIONS)
+    """Every supported document under docs_dir, including subfolders (e.g. uploads/)."""
+    return sorted(p for p in Path(docs_dir).rglob("*") if p.is_file() and p.suffix.lower() in SUPPORTED_EXTENSIONS)
 
 
-def load_chunks(docs_dir: Path, max_chars: int = MAX_CHUNK_CHARS) -> list[Chunk]:
+def source_name(path: Path, docs_dir: Path) -> str:
+    return path.relative_to(docs_dir).as_posix()
+
+
+def load_document(path: Path, docs_dir: Path, max_chars: int = MAX_CHUNK_CHARS) -> list[Chunk]:
+    source = source_name(path, docs_dir)
+    overrides = read_sidecar(path)
+    if path.suffix.lower() == ".pdf":
+        return chunk_pdf(path, source, max_chars, overrides)
+    return chunk_document(path.read_text(encoding="utf-8"), source, max_chars, overrides)
+
+
+def load_chunks(docs_dir: Path, max_chars: int = MAX_CHUNK_CHARS, errors: dict = None) -> list[Chunk]:
+    """Chunk every document. An unreadable one (corrupt PDF, bad encoding) is skipped,
+    not fatal - its source and error go into `errors` if a dict is passed."""
     chunks = []
     for path in document_paths(docs_dir):
-        chunks.extend(chunk_document(path.read_text(encoding="utf-8"), path.name, max_chars))
+        try:
+            chunks.extend(load_document(path, Path(docs_dir), max_chars))
+        except Exception as exc:  # noqa: BLE001 - one bad upload must not take down the whole index
+            if errors is not None:
+                errors[source_name(path, Path(docs_dir))] = f"{type(exc).__name__}: {exc}"
     return chunks

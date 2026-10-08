@@ -50,3 +50,36 @@ def test_ask_passes_history_and_top_k(client, monkeypatch):
 @pytest.mark.parametrize("payload", [{"question": ""}, {"question": "x", "top_k": 99}, {}])
 def test_ask_rejects_invalid_input(client, payload):
     assert client.post("/ask", json=payload).status_code == 422
+
+
+def test_upload_list_and_delete_a_document(client, monkeypatch, tmp_path):
+    import shutil
+
+    import vector_store
+    from conftest import HashEmbedder, make_pdf
+
+    docs = tmp_path / "docs"
+    shutil.copytree(vector_store.DOCS_DIR, docs)
+    store = vector_store.VectorStore(docs_dir=docs, index_dir=tmp_path / "idx2", embedder=HashEmbedder())
+    monkeypatch.setattr(vector_store, "_store", store)
+
+    resp = client.post(
+        "/documents",
+        files={"file": ("pompa.pdf", make_pdf(["Pump pressure check"]), "application/pdf")},
+        data={"doc_type": "reference", "priority": "3", "updated": "2026-09-01"},
+    )
+    assert resp.status_code == 201
+    assert resp.json() == {"source": "uploads/pompa.pdf", "chunks": 1, "error": None}
+    assert client.get("/documents").json()["documents"]["uploads/pompa.pdf"] == 1
+
+    assert client.delete("/documents/uploads/pompa.pdf").status_code == 200
+    assert "uploads/pompa.pdf" not in client.get("/documents").json()["documents"]
+
+
+def test_upload_rejects_unsupported_type(client):
+    resp = client.post("/documents", files={"file": ("rapor.docx", b"x", "application/octet-stream")})
+    assert resp.status_code == 400
+
+
+def test_built_in_documents_cannot_be_deleted(client):
+    assert client.delete("/documents/safety.md").status_code == 400

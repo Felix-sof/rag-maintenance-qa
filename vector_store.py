@@ -11,16 +11,19 @@ document never leaves stale vectors behind.
 """
 
 import hashlib
+import json
+import re
 import sys
 from pathlib import Path
 
-from chunking import MAX_CHUNK_CHARS, document_paths, load_chunks
+from chunking import MAX_CHUNK_CHARS, META_SUFFIX, SUPPORTED_EXTENSIONS, document_paths, load_chunks, source_name
 from embeddings import E5Embedder, Embedder
 
 DOCS_DIR = Path(__file__).parent / "knowledge"
 INDEX_DIR = Path(__file__).parent / "data" / "chroma"
 COLLECTION_NAME = "knowledge_base"
 MAX_TOP_K = 10
+UPLOADS_SUBDIR = "uploads"  # documents added from the UI live here and can be deleted from it
 
 
 class VectorStore:
@@ -37,9 +40,46 @@ class VectorStore:
     def fingerprint(self) -> str:
         h = hashlib.sha256(f"{self.embedder.name}|{MAX_CHUNK_CHARS}".encode("utf-8"))
         for path in document_paths(self.docs_dir):
-            h.update(path.name.encode("utf-8"))
+            h.update(source_name(path, self.docs_dir).encode("utf-8"))
             h.update(path.read_bytes())
+            sidecar = path.with_name(path.name + META_SUFFIX)
+            if sidecar.exists():
+                h.update(sidecar.read_bytes())
         return h.hexdigest()
+
+    def save_upload(self, filename: str, data: bytes, meta: dict) -> str:
+        """Store an uploaded document (plus its metadata sidecar) under uploads/ and re-index.
+
+        Returns the document's source name, e.g. "uploads/kilavuz.pdf".
+        """
+        safe = re.sub(r"[^\w.\-]+", "_", Path(filename).name).strip("._") or "belge"
+        if Path(safe).suffix.lower() not in SUPPORTED_EXTENSIONS:
+            raise ValueError(f"unsupported file type: {filename} (supported: {', '.join(SUPPORTED_EXTENSIONS)})")
+        target = self.docs_dir / UPLOADS_SUBDIR / safe
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(data)
+        target.with_name(target.name + META_SUFFIX).write_text(
+            json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+        self.build()
+        return source_name(target, self.docs_dir)
+
+    def delete_upload(self, source: str) -> None:
+        """Remove an uploaded document (only under uploads/) and re-index."""
+        target = (self.docs_dir / source).resolve()
+        uploads = (self.docs_dir / UPLOADS_SUBDIR).resolve()
+        if uploads not in target.parents:
+            raise ValueError(f"only uploaded documents can be deleted: {source}")
+        target.unlink(missing_ok=True)
+        target.with_name(target.name + META_SUFFIX).unlink(missing_ok=True)
+        self.build()
+
+    def chunk_counts(self) -> dict[str, int]:
+        """Number of indexed chunks per document source."""
+        counts: dict[str, int] = {}
+        for chunk in self.all_chunks():
+            counts[chunk["source"]] = counts.get(chunk["source"], 0) + 1
+        return counts
 
     def build(self, force: bool = False) -> dict:
         """(Re)build the index if the documents/model changed since the last build, or if forced."""
@@ -52,12 +92,15 @@ class VectorStore:
         if collection is not None:
             if not force and (collection.metadata or {}).get("fingerprint") == fingerprint:
                 self._collection = collection
-                return {"rebuilt": False, "chunks": collection.count()}
+                return {"rebuilt": False, "chunks": collection.count(), "skipped": self.skipped()}
             self._client.delete_collection(COLLECTION_NAME)
 
-        chunks = load_chunks(self.docs_dir)
+        errors: dict[str, str] = {}
+        chunks = load_chunks(self.docs_dir, errors=errors)
         collection = self._client.create_collection(
-            COLLECTION_NAME, metadata={"hnsw:space": "cosine", "fingerprint": fingerprint}
+            COLLECTION_NAME,
+            # chromadb metadata values must be scalars, so the skip report is stored as JSON
+            metadata={"hnsw:space": "cosine", "fingerprint": fingerprint, "skipped": json.dumps(errors)},
         )
         if chunks:
             collection.add(
@@ -77,7 +120,11 @@ class VectorStore:
                 ],
             )
         self._collection = collection
-        return {"rebuilt": True, "chunks": len(chunks)}
+        return {"rebuilt": True, "chunks": len(chunks), "skipped": errors}
+
+    def skipped(self) -> dict[str, str]:
+        """Documents the last build couldn't read, with the reason."""
+        return json.loads((self._get_collection().metadata or {}).get("skipped") or "{}")
 
     def _get_collection(self):
         if self._collection is None:
@@ -91,6 +138,7 @@ class VectorStore:
             "documents": len({m["source"] for m in metadatas}),
             "chunks": collection.count(),
             "embedding_model": self.embedder.name,
+            "skipped": self.skipped(),
         }
 
     def index_fingerprint(self) -> str:

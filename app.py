@@ -4,12 +4,17 @@ Streamlit chat UI for the maintenance knowledge-base assistant.
     streamlit run app.py
 """
 
+from datetime import date
+
 import streamlit as st
 
 import rag
+from chunking import META_SUFFIX
 from generator import MODEL
 from retriever import get_retriever
-from vector_store import get_store
+from vector_store import UPLOADS_SUBDIR, get_store
+
+DOC_TYPE_LABELS = {"reference": "Resmi belge", "example": "Örnek / taslak"}
 
 st.set_page_config(page_title="Bakım Asistanı (RAG)", page_icon="🛠️", layout="wide")
 
@@ -32,8 +37,50 @@ with st.sidebar:
             with st.spinner("İndeksleniyor..."):
                 get_store().build(force=True)
             st.rerun()
+        for source, error in stats["skipped"].items():
+            st.error(f"Okunamadı: {source} ({error[:120]})")
     except Exception as exc:  # noqa: BLE001 - show the problem instead of a blank page
         st.error(f"Bilgi bankası yüklenemedi: {exc}")
+
+    st.divider()
+    st.header("Belge Ekle")
+    with st.form("upload", clear_on_submit=True):
+        files = st.file_uploader("PDF, Markdown veya metin", type=["pdf", "md", "txt"], accept_multiple_files=True)
+        doc_type = st.selectbox("Tür", list(DOC_TYPE_LABELS), format_func=DOC_TYPE_LABELS.get)
+        priority = st.number_input("Öncelik (çelişkide yüksek olan geçerli)", min_value=1, max_value=10, value=2)
+        updated = st.date_input("Güncelleme tarihi", value=date.today())
+        submitted = st.form_submit_button("➕ Ekle ve indeksle")
+    if submitted and files:
+        store = get_store()
+        meta = {"type": doc_type, "priority": int(priority), "updated": updated.isoformat()}
+        for file in files:
+            with st.spinner(f"{file.name} indeksleniyor..."):
+                try:
+                    source = store.save_upload(file.name, file.getvalue(), meta)
+                except ValueError as exc:
+                    st.error(str(exc))
+                    continue
+            chunks = store.chunk_counts().get(source, 0)
+            if source in store.skipped():
+                st.error(f"{source} okunamadı: {store.skipped()[source][:150]}")
+            elif chunks == 0:
+                st.warning(f"{source}: metin çıkarılamadı (taranmış bir PDF olabilir; önce OCR gerekir).")
+            else:
+                st.success(f"{source}: {chunks} parça indekslendi.")
+
+    upload_dir = get_store().docs_dir / UPLOADS_SUBDIR
+    uploaded = sorted(p for p in upload_dir.glob("*") if p.is_file() and not p.name.endswith(META_SUFFIX))
+    if uploaded:
+        counts = get_store().chunk_counts()
+        st.caption("Yüklenen belgeler")
+        for path in uploaded:
+            source = f"{UPLOADS_SUBDIR}/{path.name}"
+            name_col, delete_col = st.columns([5, 1])
+            name_col.caption(f"{path.name} · {counts.get(source, 0)} parça")
+            if delete_col.button("🗑️", key=f"delete-{source}", help="Belgeyi sil ve yeniden indeksle"):
+                with st.spinner("Siliniyor..."):
+                    get_store().delete_upload(source)
+                st.rerun()
 
     st.divider()
     top_k = st.slider("Getirilecek parça sayısı (top-k)", 1, 8, rag.DEFAULT_TOP_K)

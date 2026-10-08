@@ -1,4 +1,5 @@
-from chunking import chunk_document, load_chunks, parse_front_matter
+from chunking import chunk_document, chunk_pdf, load_chunks, parse_front_matter
+from conftest import make_pdf
 
 DOC = """---
 title: Test Belgesi
@@ -73,13 +74,6 @@ class TestChunkDocument:
         assert len(set(first)) == len(first)
 
 
-def test_load_chunks_reads_md_and_txt_only(tmp_path):
-    (tmp_path / "a.md").write_text("# A\n\nmetin", encoding="utf-8")
-    (tmp_path / "b.txt").write_text("düz metin", encoding="utf-8")
-    (tmp_path / "c.pdf").write_bytes(b"%PDF-1.4")
-    assert sorted(c.source for c in load_chunks(tmp_path)) == ["a.md", "b.txt"]
-
-
 class TestPriority:
     def test_explicit_priority_and_updated_date(self):
         doc = "---\ntype: example\npriority: 5\nupdated: 2026-09-01\n---\n\n# A\n\nmetin\n"
@@ -94,3 +88,48 @@ class TestPriority:
     def test_invalid_priority_falls_back_to_default(self):
         chunk = chunk_document("---\ntype: reference\npriority: yüksek\n---\n\n# A\n\nx\n", "a.md")[0]
         assert chunk.priority == 2
+
+
+class TestPdf:
+    def test_one_section_per_page_titled_from_metadata(self, tmp_path):
+        path = tmp_path / "pompa.pdf"
+        path.write_bytes(make_pdf(["Pump pressure check\nOpen valve A", "Replace the filter"], title="Pompa Kilavuzu"))
+        chunks = chunk_pdf(path, "pompa.pdf")
+        assert [c.section for c in chunks] == ["Pompa Kilavuzu > s. 1", "Pompa Kilavuzu > s. 2"]
+        assert "Pump pressure check" in chunks[0].text
+        assert "Replace the filter" in chunks[1].text
+
+    def test_title_falls_back_to_file_name_and_blank_pages_are_skipped(self, tmp_path):
+        path = tmp_path / "kilavuz.pdf"
+        path.write_bytes(make_pdf(["", "Only page two has text"]))
+        assert [c.section for c in chunk_pdf(path, "kilavuz.pdf")] == ["kilavuz > s. 2"]
+
+    def test_sidecar_metadata_applies_to_pdf(self, tmp_path):
+        (tmp_path / "k.pdf").write_bytes(make_pdf(["text"]))
+        (tmp_path / "k.pdf.meta.json").write_text(
+            '{"type": "reference", "priority": 4, "updated": "2026-09-01"}', encoding="utf-8"
+        )
+        chunk = load_chunks(tmp_path)[0]
+        assert (chunk.doc_type, chunk.priority, chunk.updated) == ("reference", 4, "2026-09-01")
+
+
+class TestLoadChunks:
+    def test_reads_supported_files_including_subfolders(self, tmp_path):
+        (tmp_path / "a.md").write_text("# A\n\nmetin", encoding="utf-8")
+        (tmp_path / "uploads").mkdir()
+        (tmp_path / "uploads" / "b.txt").write_text("düz metin", encoding="utf-8")
+        (tmp_path / "c.docx").write_bytes(b"not supported")
+        assert sorted(c.source for c in load_chunks(tmp_path)) == ["a.md", "uploads/b.txt"]
+
+    def test_unreadable_document_is_skipped_and_reported(self, tmp_path):
+        (tmp_path / "a.md").write_text("# A\n\nmetin", encoding="utf-8")
+        (tmp_path / "bozuk.pdf").write_bytes(b"%PDF-1.4 this is not really a pdf")
+        errors = {}
+        assert [c.source for c in load_chunks(tmp_path, errors=errors)] == ["a.md"]
+        assert list(errors) == ["bozuk.pdf"]
+
+    def test_sidecar_overrides_front_matter(self, tmp_path):
+        (tmp_path / "a.md").write_text("---\ntype: example\n---\n\n# A\n\nx\n", encoding="utf-8")
+        (tmp_path / "a.md.meta.json").write_text('{"type": "reference"}', encoding="utf-8")
+        chunk = load_chunks(tmp_path)[0]
+        assert (chunk.doc_type, chunk.priority) == ("reference", 2)
