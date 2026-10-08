@@ -15,6 +15,10 @@ from dataclasses import dataclass
 from pathlib import Path
 
 MAX_CHUNK_CHARS = 1200
+
+# When documents conflict, the higher priority wins (then the newer `updated`
+# date). Front matter can set `priority` explicitly; otherwise it follows the type.
+DEFAULT_PRIORITY = {"reference": 2, "example": 1}
 SUPPORTED_EXTENSIONS = (".md", ".txt")
 
 HEADING_PATTERN = re.compile(r"^(#{1,6})\s+(.*\S)\s*$")
@@ -28,6 +32,8 @@ class Chunk:
     section: str  # heading path, e.g. "Arıza Modları > HDF - Isı Dağıtım Arızası"
     title: str  # document title from front matter (falls back to the file name)
     doc_type: str  # "reference" (official documentation) or "example" (illustrative)
+    priority: int = 1  # higher wins when documents conflict
+    updated: str = ""  # ISO date from front matter, "" if unknown
 
 
 def parse_front_matter(text: str) -> tuple[dict, str]:
@@ -99,6 +105,11 @@ def chunk_document(text: str, source: str, max_chars: int = MAX_CHUNK_CHARS) -> 
     meta, body = parse_front_matter(text)
     title = meta.get("title", source)
     doc_type = meta.get("type", "unknown")
+    try:
+        priority = int(meta["priority"])
+    except (KeyError, ValueError):
+        priority = DEFAULT_PRIORITY.get(doc_type, 1)
+    updated = meta.get("updated", "")
 
     chunks = []
     for heading_path, section_body in _sections(body):
@@ -127,6 +138,8 @@ def chunk_document(text: str, source: str, max_chars: int = MAX_CHUNK_CHARS) -> 
                     section=section,
                     title=title,
                     doc_type=doc_type,
+                    priority=priority,
+                    updated=updated,
                 )
             )
     return chunks

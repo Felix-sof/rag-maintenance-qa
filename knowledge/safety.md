@@ -2,6 +2,8 @@
 title: Bakım Güvenliği
 type: example
 source: Örnek amaçlı hazırlanmış güvenlik talimatı (gerçek bir tesise ait değildir)
+priority: 1
+updated: 2026-10-08
 ---
 
 # Bakım Güvenliği

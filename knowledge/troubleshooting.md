@@ -2,6 +2,8 @@
 title: Sorun Giderme Kılavuzu
 type: example
 source: Örnek amaçlı hazırlanmış sorun giderme kılavuzu (gerçek bir üreticiye ait değildir)
+priority: 1
+updated: 2026-10-08
 ---
 
 # Sorun Giderme Kılavuzu

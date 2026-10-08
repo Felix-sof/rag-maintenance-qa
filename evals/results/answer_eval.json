@@ -5,12 +5,16 @@
     "notes": [],
     "question": "HDF arızası hangi koşullarda oluşur?",
     "search_query": "HDF arızası hangi koşullarda oluşur?",
-    "answer": "HDF (Isı Dağıtım Arızası), proses ısısı yeterince dağıtılamadığında oluşur [1]. \n\nArızanın tetiklenmesi için aşağıdaki iki koşulun aynı anda ve birlikte sağlanması gerekmektedir:\n- Hava sıcaklığı ile proses sıcaklığı arasındaki farkın 8,6 K'nin altına düşmesi [1].\n- Dönüş hızının 1380 rpm'nin altında olması [1].",
+    "answer": "HDF (Isı Dağıtım Arızası), proses ısısı yeterince dağıtılamadığında oluşur [1]. Bu arızanın tetiklenmesi için aşağıdaki iki koşulun aynı anda sağlanması gerekir:\n\n1. Hava sıcaklığı ile proses sıcaklığı arasındaki farkın 8,6 K'nin altına düşmesi [1].\n2. Dönüş hızının 1380 rpm'nin altında olması [1].\n\nDüşük dönüş hızında soğutucu hava akışı azalır; ortam havası ile proses arasındaki sıcaklık farkı da küçükse ısı tezgahtan uzaklaştırılamaz ve bu durum HDF riskini oluşturur [1][2][3].",
     "cited": [
-      1
+      1,
+      2,
+      3
     ],
+    "conflict": false,
     "top_score": 0.8916,
-    "elapsed_s": 45.9
+    "elapsed_s": 27.2,
+    "model": "gemini-3.5-flash"
   },
   {
     "id": "pwf_power_band",
@@ -83,12 +87,14 @@
     "notes": [],
     "question": "Kesici takım nasıl değiştirilir, adımlar neler?",
     "search_query": "Kesici takım nasıl değiştirilir, adımlar neler?",
-    "answer": "Kesici takım değişimi adımları şunlardır [1]:\n\n1. Tezgahı durdurun ve enerji izolasyonunu uygulayın (bkz. safety.md) [1].\n2. İş milinin tamamen durduğunu doğrulayın; takım ve iş parçası soğuyana kadar bekleyin [1].\n3. Takım tutucuyu sökün ve aşınmış takımı çıkarın; kırık takım parçası varsa iş parçası ve fikstürde kalıntı kontrolü yapın [1].\n4. Yeni takımı üretici tarafından belirtilen sıkma torkuyla takın [1].\n5. Takım ofsetini ölçün ve kontrol ünitesine girin [1].\n6. Takım aşınma sayacını sıfırlayın ve değişimi bakım kaydına işleyin [1].\n7. Deneme kesimi yapın ve ilk parçada boyut ve yüzey kontrolü yapın [1].\n\nNot: Bu prosedür örnek bir belgeden alınmıştır; tesisin kendi kılavuzu önceliklidir [1].",
+    "answer": "Kesici takım değişimi adımları şu şekildedir [1]:\n\n1. Tezgahı durdurun ve enerji izolasyonunu uygulayın [1].\n2. İş milinin tamamen durduğunu doğrulayın; takım ve iş parçası soğuyana kadar bekleyin [1].\n3. Takım tutucuyu sökün ve aşınmış takımı çıkarın. Kırık takım parçası varsa iş parçası ve fikstürde kalıntı kontrolü yapın [1].\n4. Yeni takımı üretici tarafından belirtilen sıkma torkuyla takın [1].\n5. Takım ofsetini ölçün ve kontrol ünitesine girin [1].\n6. Takım aşınma sayacını sıfırlayın ve değişimi bakım kaydına işleyin [1].\n7. Deneme kesimi yapın ve ilk parçada boyut ve yüzey kontrolü yapın [1].\n\n*Not: Bu prosedür örnek bir belgeye dayandığı için fabrikanın kendi orijinal kullanım kılavuzu önceliklidir [1].*",
     "cited": [
       1
     ],
+    "conflict": false,
     "top_score": 0.8902,
-    "elapsed_s": 31.2
+    "elapsed_s": 5.3,
+    "model": "gemini-3.5-flash"
   },
   {
     "id": "high_torque_causes",
@@ -181,6 +187,39 @@
     "cited": [],
     "top_score": 0.8397,
     "elapsed_s": 10.4,
+    "model": "gemini-3.5-flash"
+  },
+  {
+    "id": "conflict_higher_priority_wins",
+    "status": "pass",
+    "notes": [],
+    "question": "HDF arızası hangi dönüş hızının altında oluşur?",
+    "search_query": "HDF arızası hangi dönüş hızının altında oluşur?",
+    "answer": "⚠️ Çelişki: HDF arızasının hangi dönüş hızının altında tetiklendiği konusunda belgeler arasında çelişki bulunmaktadır. [1] numaralı belgeye göre arıza, dönüş hızı 1500 rpm'nin altına düştüğünde oluşurken [1], [2] numaralı belgeye göre dönüş hızı 1380 rpm'nin altına düştüğünde oluşmaktadır [2]. \n\nDaha yüksek öncelik değerine (öncelik 3) sahip olan [1] numaralı belge geçerlidir. Bu doğrultuda, hava ile proses sıcaklığı farkı 8,6 K'nin altındayken dönüş hızı **1500 rpm**'nin altına düştüğünde HDF arızası oluşur [1].",
+    "cited": [
+      1,
+      2
+    ],
+    "conflict": true,
+    "top_score": 0.898,
+    "elapsed_s": 12.8,
+    "model": "gemini-3.5-flash"
+  },
+  {
+    "id": "conflict_equal_priority_newer_wins",
+    "status": "pass",
+    "notes": [],
+    "question": "Soğutma sıvısı seviyesi ne sıklıkla kontrol edilmeli?",
+    "search_query": "Soğutma sıvısı seviyesi ne sıklıkla kontrol edilmeli?",
+    "answer": "⚠️ Çelişki: Soğutma sıvısı seviyesinin kontrol sıklığı konusunda belgeler arasında farklılık bulunmaktadır. Eski Soğutma Talimatı'na göre seviye ayda bir kontrol edilir [1]. Periyodik Bakım Planı'na göre ise kontrol her vardiyada yapılmalıdır [3]. Her iki belgenin önceliği eşit (öncelik 1) olduğundan, daha güncel olan (2026-10-08) Periyodik Bakım Planı geçerlidir ve kontrol her vardiyada yapılmalıdır [3].\n\nBunun yanı sıra, aşağıdaki durumlar gerçekleştiğinde de soğutma sıvısı seviyesi kontrol edilmelidir [2]:\n- Proses sıcaklığı ile hava sıcaklığı arasındaki fark azaldığında,\n- Isı dağıtım arızaları (HDF) arttığında,\n- Tezgah gövdesinde aşırı ısınma gözlendiğinde.\n\n*Not: Kullanılan kaynaklar örnek belge niteliğinde olduğundan, tesisin kendi orijinal kullanım kılavuzu önceliklidir [1][2][3].*",
+    "cited": [
+      1,
+      2,
+      3
+    ],
+    "conflict": true,
+    "top_score": 0.9072,
+    "elapsed_s": 9.1,
     "model": "gemini-3.5-flash"
   }
 ]

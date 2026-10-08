@@ -2,6 +2,8 @@
 title: Arıza Modları ve Oluşma Koşulları
 type: reference
 source: AI4I 2020 veri seti dokümantasyonu (Matzka, 2020; UCI ML Repository #601)
+priority: 2
+updated: 2026-10-08
 ---
 
 # Arıza Modları ve Oluşma Koşulları

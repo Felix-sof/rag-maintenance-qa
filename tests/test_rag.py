@@ -19,10 +19,14 @@ class TestExtractCitations:
         assert rag.extract_citations("Kaynaksız cevap.", 3) == []
 
 
-def test_context_is_numbered_and_marks_example_documents():
-    context = rag.format_context(RELEVANT)
-    assert context.startswith("[1] failure_modes.md > Arızalar > HDF\nHDF düşük")
-    assert "[2] safety.md > Kilitleme (örnek belge)" in context
+def test_context_is_numbered_and_tagged_with_type_priority_and_date():
+    hits = [
+        {**RELEVANT[0], "priority": 3, "updated": "2026-09-01"},
+        {**RELEVANT[1], "priority": 1},
+    ]
+    context = rag.format_context(hits)
+    assert context.startswith("[1] failure_modes.md > Arızalar > HDF (öncelik 3, güncelleme 2026-09-01)\nHDF düşük")
+    assert "[2] safety.md > Kilitleme (örnek belge, öncelik 1)" in context
 
 
 class TestAnswer:
@@ -39,6 +43,16 @@ class TestAnswer:
         assert system == rag.SYSTEM_PROMPT
         assert "[1] failure_modes.md > Arızalar > HDF" in prompt
         assert prompt.endswith("Question: HDF nedir?")
+
+    def test_conflict_marker_sets_the_conflict_flag(self):
+        answer = f"{rag.CONFLICT_MARKER} [1] 1380 rpm diyor, [2] 1500 rpm diyor. Öncelik [2]'de."
+        out = rag.answer("HDF?", retriever=StubStore(RELEVANT), generator=FakeGenerator(answer))
+        assert out["conflict"] is True
+        assert out["cited"] == [1, 2]
+
+    def test_no_conflict_by_default(self):
+        out = rag.answer("HDF?", retriever=StubStore(RELEVANT), generator=FakeGenerator("Cevap [1]."))
+        assert out["conflict"] is False
 
     def test_off_topic_question_is_refused_without_calling_the_llm(self):
         gen = FakeGenerator()

@@ -2,6 +2,8 @@
 title: Sensör ve Kolon Referansı
 type: reference
 source: AI4I 2020 veri seti dokümantasyonu (Matzka, 2020; UCI ML Repository #601)
+priority: 2
+updated: 2026-10-08
 ---
 
 # Sensör ve Kolon Referansı

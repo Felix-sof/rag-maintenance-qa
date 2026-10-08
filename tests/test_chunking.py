@@ -78,3 +78,19 @@ def test_load_chunks_reads_md_and_txt_only(tmp_path):
     (tmp_path / "b.txt").write_text("düz metin", encoding="utf-8")
     (tmp_path / "c.pdf").write_bytes(b"%PDF-1.4")
     assert sorted(c.source for c in load_chunks(tmp_path)) == ["a.md", "b.txt"]
+
+
+class TestPriority:
+    def test_explicit_priority_and_updated_date(self):
+        doc = "---\ntype: example\npriority: 5\nupdated: 2026-09-01\n---\n\n# A\n\nmetin\n"
+        chunk = chunk_document(doc, "a.md")[0]
+        assert (chunk.priority, chunk.updated) == (5, "2026-09-01")
+
+    def test_priority_defaults_follow_document_type(self):
+        assert chunk_document("---\ntype: reference\n---\n\n# A\n\nx\n", "a.md")[0].priority == 2
+        assert chunk_document("---\ntype: example\n---\n\n# A\n\nx\n", "a.md")[0].priority == 1
+        assert chunk_document("# A\n\nx\n", "a.md")[0].priority == 1
+
+    def test_invalid_priority_falls_back_to_default(self):
+        chunk = chunk_document("---\ntype: reference\npriority: yüksek\n---\n\n# A\n\nx\n", "a.md")[0]
+        assert chunk.priority == 2

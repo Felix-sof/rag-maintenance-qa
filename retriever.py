@@ -144,6 +144,8 @@ class Retriever:
                     "source": chunk["source"],
                     "section": chunk["section"],
                     "doc_type": chunk["doc_type"],
+                    "priority": chunk.get("priority", 1),
+                    "updated": chunk.get("updated", ""),
                     "score": round(cosine, 4),
                     "text": chunk["text"],
                     "ranks": {

@@ -16,6 +16,12 @@ Checks per case:
     expect_no_answer  the answer must be the NO_ANSWER refusal (off-topic or
                       not covered by the documents)
     history           optional earlier turns, to test follow-up condensing
+    extra_docs        {file name: content} added to a temporary copy of the
+                      knowledge base for this case only (e.g. a conflicting
+                      document); knowledge/ itself is never modified
+    expect_conflict   the answer must flag the conflict (CONFLICT_MARKER).
+                      Every other case must NOT flag one - a false alarm on
+                      agreeing sources is a failure too.
 
 Any answer that isn't a refusal must cite at least one source.
 A case whose LLM call failed (quota, network) is reported as infra_error and
@@ -25,12 +31,16 @@ Results go to evals/results/answer_eval.json.
 """
 
 import json
+import shutil
 import sys
+import tempfile
 import time
 from pathlib import Path
 
 import rag
 from generator import MODEL
+from retriever import Retriever, get_retriever
+from vector_store import DOCS_DIR, VectorStore, get_store
 
 RESULTS_PATH = Path(__file__).parent / "results" / "answer_eval.json"
 PAUSE_SECONDS = 5  # stay well under the free-tier requests-per-minute limit
@@ -127,6 +137,34 @@ CASES = [
         "question": "Bu ay fabrikada kaç arıza oldu?",
         "expect_no_answer": True,
     },
+    # --- conflicting documents: must surface both values, not silently pick one ---
+    {
+        "id": "conflict_higher_priority_wins",
+        "extra_docs": {
+            "hdf_saha_notu.md": (
+                "---\ntitle: HDF Saha Notu\ntype: reference\npriority: 3\nupdated: 2026-09-15\n---\n\n"
+                "# HDF Saha Notu\n\n## HDF Tetiklenme Koşulu (Revize)\n\n"
+                "Saha ölçümlerine göre ısı dağıtım arızası (HDF), hava ile proses sıcaklığı farkı "
+                "8,6 K'nin altındayken dönüş hızı 1500 rpm'nin altına düştüğünde oluşur.\n"
+            )
+        },
+        "question": "HDF arızası hangi dönüş hızının altında oluşur?",
+        "expect_conflict": True,
+        "expect_terms": [["1380", "1.380"], ["1500", "1.500"]],
+    },
+    {
+        "id": "conflict_equal_priority_newer_wins",
+        "extra_docs": {
+            "sogutma_eski_talimat.md": (
+                "---\ntitle: Eski Soğutma Talimatı\ntype: example\npriority: 1\nupdated: 2024-01-10\n---\n\n"
+                "# Eski Soğutma Talimatı\n\n## Soğutma Sıvısı Kontrol Sıklığı\n\n"
+                "Soğutma sıvısı seviyesi ayda bir kontrol edilir.\n"
+            )
+        },
+        "question": "Soğutma sıvısı seviyesi ne sıklıkla kontrol edilmeli?",
+        "expect_conflict": True,
+        "expect_terms": [["vardiya"], ["ayda"]],
+    },
 ]
 
 
@@ -159,7 +197,34 @@ def grade(case: dict, out: dict) -> tuple[str, list[str]]:
         if not any(term.lower() in lowered for term in group):
             notes.append(f"answer is missing any of {group}")
 
+    if case.get("expect_conflict") and not out["conflict"]:
+        notes.append("sources conflict, but the answer did not flag it")
+    if not case.get("expect_conflict") and out["conflict"]:
+        notes.append("flagged a conflict between sources that agree")
+
     return ("fail" if notes else "pass"), notes
+
+
+def retriever_with_extra_docs(extra_docs: dict, workdir: Path) -> Retriever:
+    """A retriever over a temporary copy of knowledge/ plus extra documents."""
+    docs = workdir / "knowledge"
+    shutil.copytree(DOCS_DIR, docs)
+    for name, content in extra_docs.items():
+        (docs / name).write_text(content, encoding="utf-8")
+    store = VectorStore(docs_dir=docs, index_dir=workdir / "index", embedder=get_store().embedder)
+    default = get_retriever()
+    return Retriever(store=store, mode=default.mode, reranker=default.reranker)
+
+
+def run_case(case: dict) -> dict:
+    if not case.get("extra_docs"):
+        return rag.answer(case["question"], history=case.get("history"))
+    workdir = Path(tempfile.mkdtemp(prefix="rag_eval_"))
+    try:
+        retriever = retriever_with_extra_docs(case["extra_docs"], workdir)
+        return rag.answer(case["question"], history=case.get("history"), retriever=retriever)
+    finally:
+        shutil.rmtree(workdir, ignore_errors=True)  # chromadb may still hold the files open on Windows
 
 
 def run(only: set = None) -> list[dict]:
@@ -169,7 +234,7 @@ def run(only: set = None) -> list[dict]:
         if i:
             time.sleep(PAUSE_SECONDS)
         start = time.monotonic()
-        out = rag.answer(case["question"], history=case.get("history"))
+        out = run_case(case)
         status, notes = grade(case, out)
         rows.append(
             {
@@ -180,7 +245,8 @@ def run(only: set = None) -> list[dict]:
                 "search_query": out["search_query"],
                 "answer": out["answer"],
                 "cited": out["cited"],
-                "top_score": out["sources"][0]["score"] if out["sources"] else None,
+                "conflict": out["conflict"],
+                "top_score": max((s["score"] for s in out["sources"]), default=None),
                 "elapsed_s": round(time.monotonic() - start, 1),
                 "model": MODEL,
             }

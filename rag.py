@@ -39,6 +39,7 @@ MAX_HISTORY_TURNS = 4
 MIN_SCORE = 0.80
 
 NO_ANSWER = "Bilgi bankasında bu sorunun cevabı yok."
+CONFLICT_MARKER = "⚠️ Çelişki:"
 
 SYSTEM_PROMPT = f"""You are a maintenance assistant for a milling machine. You answer
 questions using ONLY the numbered context passages from the plant's maintenance
@@ -52,6 +53,13 @@ Rules:
 - If the context does not contain the answer, reply with exactly this sentence and
   nothing else: "{NO_ANSWER}" If it answers only part of the question, answer that
   part and say clearly which part is not covered.
+- If passages disagree about the same fact (different thresholds, values or steps), do
+  NOT silently pick one. Start the answer with a line beginning "{CONFLICT_MARKER}" that
+  gives each version with its citation. Then say which one applies: the passage with
+  the higher öncelik wins; if öncelik is equal, the more recent güncelleme date wins; if
+  that still doesn't decide it, say it can't be decided from the documents and should
+  be confirmed with the responsible engineer. Do not use the marker when passages merely
+  add different, compatible details.
 - Passages marked (örnek belge) are illustrative procedures, not a real manufacturer's
   manual. When you give steps from one, add one short note that the plant's own manual
   takes precedence.
@@ -73,8 +81,11 @@ Follow-up question: {question}"""
 def format_context(hits: list[dict]) -> str:
     blocks = []
     for n, hit in enumerate(hits, start=1):
-        label = " (örnek belge)" if hit["doc_type"] == "example" else ""
-        blocks.append(f"[{n}] {hit['source']} > {hit['section']}{label}\n{hit['text']}")
+        tags = ["örnek belge"] if hit["doc_type"] == "example" else []
+        tags.append(f"öncelik {hit.get('priority', 1)}")
+        if hit.get("updated"):
+            tags.append(f"güncelleme {hit['updated']}")
+        blocks.append(f"[{n}] {hit['source']} > {hit['section']} ({', '.join(tags)})\n{hit['text']}")
     return "\n\n".join(blocks)
 
 
@@ -107,12 +118,21 @@ def answer(question: str, history: list[dict] = None, top_k: int = DEFAULT_TOP_K
 
     Returns a dict with "answer", "sources" (every retrieved chunk, numbered
     as in the prompt), "cited" (the source numbers the answer actually
-    uses), "search_query" (the question after condensing), and "error"
-    (True only if the LLM call failed).
+    uses), "search_query" (the question after condensing), "conflict" (True
+    if the answer reports that its sources disagree), and "error" (True
+    only if the LLM call failed).
     """
     retriever = retriever or get_retriever()
     generator = generator or get_generator()
-    result = {"question": question, "search_query": question, "answer": "", "sources": [], "cited": [], "error": False}
+    result = {
+        "question": question,
+        "search_query": question,
+        "answer": "",
+        "sources": [],
+        "cited": [],
+        "conflict": False,
+        "error": False,
+    }
 
     try:
         search_query = condense_question(question, history, generator) if history else question
@@ -132,6 +152,7 @@ def answer(question: str, history: list[dict] = None, top_k: int = DEFAULT_TOP_K
         return result
 
     result["cited"] = extract_citations(result["answer"], len(hits))
+    result["conflict"] = CONFLICT_MARKER in result["answer"]
     return result
 
 

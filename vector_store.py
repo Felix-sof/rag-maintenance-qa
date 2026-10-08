@@ -65,7 +65,14 @@ class VectorStore:
                 documents=[c.text for c in chunks],
                 embeddings=self.embedder.embed_documents([c.text for c in chunks]),
                 metadatas=[
-                    {"source": c.source, "section": c.section, "title": c.title, "doc_type": c.doc_type}
+                    {
+                        "source": c.source,
+                        "section": c.section,
+                        "title": c.title,
+                        "doc_type": c.doc_type,
+                        "priority": c.priority,
+                        "updated": c.updated,
+                    }
                     for c in chunks
                 ],
             )
@@ -121,6 +128,8 @@ class VectorStore:
                 "source": meta["source"],
                 "section": meta["section"],
                 "doc_type": meta["doc_type"],
+                "priority": meta.get("priority", 1),
+                "updated": meta.get("updated", ""),
                 "score": round(1 - dist, 4),
                 "text": doc,
             }

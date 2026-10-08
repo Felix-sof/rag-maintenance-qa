@@ -69,6 +69,8 @@ for turn in st.session_state.turns:
     with st.chat_message("user"):
         st.markdown(turn["question"])
     with st.chat_message("assistant"):
+        if turn["result"].get("conflict"):
+            st.warning("Kaynaklar bu konuda birbiriyle çelişiyor.")
         st.markdown(turn["answer"])
         render_sources(turn["result"])
 
@@ -83,6 +85,8 @@ if question:
         if result["error"]:
             st.error(result["answer"])
         else:
+            if result["conflict"]:
+                st.warning("Kaynaklar bu konuda birbiriyle çelişiyor. Cevaptaki iki versiyonu ve hangisinin neden geçerli sayıldığını kontrol edin.")
             st.markdown(result["answer"])
         render_sources(result)
 

@@ -12,7 +12,7 @@ SOURCES = [
 
 
 def _out(answer, cited, error=False):
-    return {"answer": answer, "cited": cited, "sources": SOURCES, "error": error}
+    return {"answer": answer, "cited": cited, "sources": SOURCES, "error": error, "conflict": False}
 
 
 def test_pass_when_expected_source_cited_and_terms_present():
@@ -47,3 +47,16 @@ def test_refusal_case():
 
 def test_llm_failure_is_infra_error_not_fail():
     assert grade(CASE, _out("Cevap üretilemedi: 429", [], error=True))[0] == "infra_error"
+
+
+def test_expected_conflict_must_be_flagged():
+    case = {"id": "c", "question": "q", "expect_conflict": True}
+    assert grade(case, {**_out("1380 [1], 1500 [2].", [1, 2]), "conflict": False})[0] == "fail"
+    assert grade(case, {**_out("⚠️ Çelişki: 1380 [1], 1500 [2].", [1, 2]), "conflict": True})[0] == "pass"
+
+
+def test_false_conflict_alarm_fails():
+    out = {**_out("⚠️ Çelişki: 8.6 K [1].", [1]), "conflict": True}
+    status, notes = grade(CASE, out)
+    assert status == "fail"
+    assert "flagged a conflict" in notes[0]

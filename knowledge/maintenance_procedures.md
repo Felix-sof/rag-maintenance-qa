@@ -2,6 +2,8 @@
 title: Bakım Prosedürleri
 type: example
 source: Örnek amaçlı hazırlanmış bakım prosedürü (gerçek bir üreticiye ait değildir)
+priority: 1
+updated: 2026-10-08
 ---
 
 # Bakım Prosedürleri
