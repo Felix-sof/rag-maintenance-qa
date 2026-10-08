@@ -8,6 +8,8 @@ the section that actually answers it among the top-k results?
 
     python -m evals.retrieval_eval                  # compare all retrieval modes
     python -m evals.retrieval_eval --mode hybrid    # one mode, with per-question detail
+    python -m evals.retrieval_eval --min-mrr 0.9    # CI gate: exit 1 if the default mode
+                                                    # (RETRIEVAL_MODE) scores below this on any set
 
 Two question sets:
     EASY  phrased close to the documents' own wording (written alongside them)
@@ -24,7 +26,7 @@ match on "<source> > <section>".
 
 import sys
 
-from retriever import MODES, Retriever
+from retriever import MODES, RETRIEVAL_MODE, Retriever
 
 # (question, [expected "source > section" substrings])
 # EASY: phrased close to the documents' own wording.
@@ -147,3 +149,11 @@ if __name__ == "__main__":
             f"{r['hit@1']:7.0%} {r[f'hit@{k}']:7.0%} {r['mrr']:8.3f}" for r in (by_set["easy"], by_set["hard"])
         )
         print(f"{mode:15s} | {cells}")
+
+    if "--min-mrr" in sys.argv:
+        threshold = float(sys.argv[sys.argv.index("--min-mrr") + 1])
+        below = {name: r["mrr"] for name, r in results[RETRIEVAL_MODE].items() if r["mrr"] < threshold}
+        if below:
+            print(f"\nFAIL: {RETRIEVAL_MODE} MRR below {threshold}: {below}")
+            sys.exit(1)
+        print(f"\nOK: {RETRIEVAL_MODE} MRR >= {threshold} on every set")

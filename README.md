@@ -1,220 +1,313 @@
-# Maintenance RAG Assistant
+# rag-maintenance-qa
 
-A retrieval-augmented generation (RAG) assistant that answers questions about
-milling-machine maintenance - failure modes, maintenance procedures,
-troubleshooting, safety - **only from a document knowledge base, citing the
-source of every fact**. Ask in Turkish (or English):
+[![CI](https://github.com/Felix-sof/rag-maintenance-qa/actions/workflows/ci.yml/badge.svg)](https://github.com/Felix-sof/rag-maintenance-qa/actions/workflows/ci.yml)
+
+A retrieval-augmented generation (RAG) assistant for industrial maintenance. It
+answers questions about failure modes, procedures, troubleshooting and safety
+**only from a document knowledge base, citing the source of every fact**.
+When the documents don't cover a question, it says so. When two documents
+disagree, it shows both versions instead of quietly picking one.
 
 ```
 $ python rag.py "HDF arızası hangi koşullarda oluşur?"
 
-<answer citing the passages it used, e.g. "... 8,6 K'nin altına düşer ve dönüş hızı
-1380 rpm'nin altındadır [1]." - exact wording depends on the model>
+HDF (Isı Dağıtım Arızası), proses ısısı yeterince dağıtılamadığında oluşur [1].
 
- *[1] 0.892  failure_modes.md > Arıza Modları ve Oluşma Koşulları > HDF - Isı Dağıtım Arızası (...)
+Tetiklenme koşulu olarak, hava sıcaklığı ile proses sıcaklığı arasındaki farkın 8,6 K'nin
+altına düşmesi **ve** aynı anda dönüş hızının 1380 rpm'nin altında olması gerekir [1].
+Arızanın gerçekleşmesi için bu iki koşulun birlikte sağlanması zorunludur [1].
+
+ *[1] 0.892  failure_modes.md > Arıza Modları ve Oluşma Koşulları > HDF - Isı Dağıtım Arızası
   [2] 0.877  troubleshooting.md > Sorun Giderme Kılavuzu > Belirti: Proses ve Hava Sıcaklığı Farkı Azalıyor
-  [3] 0.874  sensor_reference.md > Sensör ve Kolon Referansı > Arıza Etiketleri (...)
-  [4] 0.852  troubleshooting.md > Sorun Giderme Kılavuzu > Belirti: Dönüş Hızı Düşük
+  ...
 ```
 
-(`*` = cited by the answer. The scores and ranking are real retrieval output.)
+Turkish-first, and English questions work too. Embeddings and reranking run
+locally on CPU; generation uses the Google Gemini free tier.
 
-If the documents don't cover a question, it says so instead of guessing.
+**Highlights**
 
-Embeddings run locally (no API cost); generation uses the Google Gemini free
-tier.
+- **Hybrid retrieval**: dense vectors and BM25, fused with Reciprocal Rank Fusion
+  and re-ranked by a multilingual cross-encoder. On a hard query set, MRR goes
+  from **0.786 (vectors only) to 0.942**.
+- **Grounded answers**: every claim is cited as `[n]`. Off-topic questions are
+  refused by a score gate before any LLM call, and near-domain gaps are refused
+  by the prompt.
+- **Conflict handling**: documents carry a priority and a revision date. Conflicting
+  sources are flagged (`⚠️ Çelişki:`) with both versions cited, then resolved by
+  priority and then by recency.
+- **PDF, Markdown and text documents**, uploaded from the UI or the API. PDF
+  citations point at the page.
+- **Follow-up questions**: "Peki adımları neler?" is rewritten into a standalone
+  question before retrieval.
+- **Measured, not assumed**: a retrieval eval with a CI quality gate, an end-to-end
+  answer eval against the live LLM, and 85 offline unit tests.
 
-## How it works
+## Architecture
 
 ```
-                       ┌─────────────── indexing (once, auto-refreshed) ───────────────┐
- knowledge/*.md ──► chunking.py ──► embeddings.py ──► vector_store.py (ChromaDB)
-                   split by heading   multilingual-e5     cosine index + fingerprint
-                       └───────────────────────────────────────────────────────────────┘
+ indexing (automatic, fingerprinted)
+ ───────────────────────────────────
+ knowledge/**/*.md|txt|pdf ─► chunking.py ─► embeddings.py ─► vector_store.py (ChromaDB)
+                              by heading      multilingual-e5   cosine index; rebuilds itself
+                              / by PDF page   (local, CPU)      when docs or model change
 
- question ─► 1 condense ─► 2 retrieve ─► 3 gate ─► 4 augment ─► 5 generate ─► 6 verify
-             (follow-ups)   top-k chunks  score <    numbered    Gemini,        which [n]
-                                          MIN_SCORE  context     context-only   were cited
-                                          → refuse   [1]..[k]    + cite [n]
+ answering (rag.py)
+ ──────────────────
+ question ─► condense ─► retrieve ─────────────────────────► gate ─► generate ─► verify
+             follow-ups   retriever.py:                       best     Gemini:    which [n]
+             into a       vectors ─┐                          cosine   context    were cited?
+             standalone   BM25 ────┴► RRF fusion ─► cross-    < 0.80   only, cite  conflict
+             question                               encoder   → "not   [n], flag   flagged?
+                                                    rerank    in KB"   conflicts
 ```
 
 | File | Role |
 |---|---|
-| `chunking.py` | Splits documents on Markdown headings so each chunk is one coherent section; prepends the heading path ("Bakım Prosedürleri > Kesici Takım Değişimi") so a chunk says what it's about. Long sections split on sentence boundaries. |
-| `embeddings.py` | [`intfloat/multilingual-e5-small`](https://huggingface.co/intfloat/multilingual-e5-small) via `sentence-transformers`, on CPU. Uses E5's `query:` / `passage:` prefixes. |
-| `vector_store.py` | Persistent ChromaDB index in `data/chroma/`. Stores a fingerprint of the documents + embedding model + chunk size, and rebuilds itself when any of them change - editing a document never leaves stale vectors. |
-| `generator.py` | Gemini client with retries for rate limits (429), server errors and flaky TLS connections. |
-| `rag.py` | The pipeline (below). |
-| `app.py` | Streamlit chat UI: answers, follow-ups, and an expandable source list marking which retrieved chunks the answer actually cited. |
-| `api.py` | FastAPI: `POST /ask`, `GET /search` (retrieval only), `GET /health`. |
+| `chunking.py` | Markdown is split on headings, with the heading path prepended to each chunk. PDFs are split by page. Metadata comes from a `.meta.json` sidecar, then front matter, then defaults. An unreadable file is skipped and reported; it never breaks the index. |
+| `embeddings.py` | [`intfloat/multilingual-e5-small`](https://huggingface.co/intfloat/multilingual-e5-small) with E5's `query:`/`passage:` prefixes. |
+| `vector_store.py` | Persistent ChromaDB index, fingerprinted on documents + model + chunk size and rebuilt automatically. Handles upload and delete, with path-traversal-safe names and deletion limited to `uploads/`. |
+| `retriever.py` | Hybrid search: BM25 with Turkish-aware lowercasing and first-5-character stemming, RRF fusion, and a cross-encoder rerank of the shortlist. |
+| `rag.py` | The pipeline: condense → retrieve → gate → generate → verify citations and conflicts. |
+| `generator.py` | Gemini client. Retries 429/5xx and dropped TLS connections on fresh clients, and fails fast when the daily quota is exhausted. |
+| `app.py` | Streamlit chat UI: cited answers, conflict warnings, source inspector (which retriever found each chunk and its rerank score), document upload and delete. |
+| `api.py` | FastAPI: `/ask`, `/search` (with `?mode=` to compare retrievers), `/documents` (GET/POST/DELETE), `/health`. |
 
-### The pipeline (`rag.answer`)
+## Design decisions, with numbers
 
-1. **Condense.** A follow-up like *"Peki kontrol adımları neler?"* is
-   meaningless to a retriever on its own - searched raw, it ranks the wrong
-   procedure first. With conversation history, the LLM first rewrites it into
-   a standalone question (*"Soğutma sisteminin kontrol adımları nelerdir?"*).
-   Standalone questions skip this call.
-2. **Retrieve** the top-k chunks (default 4).
-3. **Gate.** If even the best chunk scores below `MIN_SCORE`, answer
-   *"Bilgi bankasında bu sorunun cevabı yok."* without calling the LLM.
-4. **Augment.** Number the chunks `[1]..[k]`, with source, section, and an
-   *(örnek belge)* flag for illustrative documents.
-5. **Generate.** The system prompt allows only facts from the context, a
-   `[n]` citation after each one, and the exact refusal sentence if the
-   context doesn't answer the question.
-6. **Verify.** Parse which `[n]` the answer actually cites (ignoring
-   out-of-range numbers), so the UI can tell *used* sources from merely
-   *retrieved* ones.
+### Why hybrid retrieval and a reranker
+
+Embeddings capture meaning ("makine ısınıp yavaş dönüyor" → heat dissipation
+failure) but miss exact tokens: failure codes like `OSF`, thresholds like
+`8,6 K`. BM25 is the opposite. `evals/retrieval_eval.py` measures both on two
+question sets:
+
+- **easy** (20): phrased like the documents.
+- **hard** (30): paraphrases with little word overlap, bare codes and numbers,
+  acronyms the documents never spell out, and English questions against Turkish
+  documents.
+
+| Mode | easy hit@1 | easy MRR | **hard hit@1** | **hard MRR** |
+|---|---|---|---|---|
+| vector | 95% | 0.975 | 70% | 0.786 |
+| bm25 | 70% | 0.825 | 60% | 0.697 |
+| hybrid (RRF) | 95% | 0.975 | 77% | 0.822 |
+| **hybrid + rerank** (default) | **95%** | **0.975** | **93%** | **0.942** |
+
+On the easy set the modes are tied, because it was already at the ceiling. The
+hard set is where retrieval actually differs. The one remaining miss is
+"LOTO prosedürü": the acronym never appears in the documents, so no retriever
+can match it. Fixing that needs synonym or acronym expansion, not better
+ranking. Note that both question sets were written by the author of the
+documents, so the absolute numbers are optimistic; the comparison between
+modes is the useful part.
+
+BM25 on Turkish needs care. The language is agglutinative ("arıza", "arızası",
+"arızaların"), so tokens are truncated to their first 5 characters, a simple
+stemmer that has been studied for Turkish IR (Can et al., 2008). Lowercasing
+also has to follow Turkish rules (`I` → `ı`, `İ` → `i`).
 
 ### Why two layers of refusal
 
-The threshold was calibrated by measuring real scores, and it can't do the
-job alone. multilingual-e5 squeezes all similarities into a narrow band:
+The score gate was calibrated by measuring real cosine similarities, and on its
+own it can't do the job. multilingual-e5 squeezes all scores into a narrow band:
 
-| Question type | Top score |
+| Question | Top cosine |
 |---|---|
-| Covered by the docs (10 questions) | 0.838 - 0.896 |
-| Clearly unrelated ("pizza tarifi", "Türkiye'nin başkenti", "Python'da liste") | 0.738 - 0.799 |
-| Same domain, not in the docs ("hidrolik pres yağ değişimi", "bu ay kaç arıza oldu") | 0.810 - 0.839 |
+| Covered by the documents | 0.838 - 0.896 |
+| Unrelated ("pizza tarifi", "Türkiye'nin başkenti") | 0.738 - 0.799 |
+| Same domain, not covered ("hidrolik pres yağ değişimi", "bu ay kaç arıza oldu") | 0.810 - 0.839 |
 
 The last row overlaps the first, so no threshold separates them. `MIN_SCORE =
-0.80` cheaply rejects the clearly unrelated ones (no LLM call); near-domain
-gaps are left to the prompt's refusal rule. Re-measure if you change the
-embedding model or the documents substantially.
+0.80` rejects clearly unrelated questions without calling the LLM, and the
+prompt rule catches near-domain gaps. The gate always uses the embedding cosine,
+whichever retriever ranked the chunks.
+
+### Conflicting sources
+
+Each document has a `priority` (default: `reference` 2, `example` 1) and an
+`updated` date, and both appear next to every passage in the prompt. When
+passages disagree, the model must start with `⚠️ Çelişki:`, cite every version,
+and resolve the conflict by priority, then by recency, or else say it can't be
+decided. A silent pick is never acceptable. The answer eval tests both
+resolution paths, and every other case fails if it raises a false conflict
+alarm.
+
+### Follow-up questions
+
+Searched as-is, *"Peki kontrol adımları neler?"* ranks the wrong procedure
+first. With history, the LLM first rewrites it into *"Soğutma sisteminin
+kontrol adımları nelerdir?"*, and the right section comes back with a cosine of
+0.898.
 
 ## Knowledge base
 
 | File | Type | Content |
 |---|---|---|
-| `failure_modes.md` | reference | Exact triggering conditions of the five failure modes (TWF, HDF, PWF, OSF, RNF) |
+| `failure_modes.md` | reference | Exact triggering conditions of TWF / HDF / PWF / OSF / RNF |
 | `sensor_reference.md` | reference | What each sensor measures and how it behaves |
 | `maintenance_procedures.md` | example | Tool change, cooling system, spindle/drive checks, periodic plan |
 | `troubleshooting.md` | example | Symptom → likely causes → risk → action |
 | `safety.md` | example | Lockout/tagout, PPE, hot surfaces and broken tools |
 
-**Provenance.** `reference` documents are written from the published
+**Provenance.** The `reference` documents are written from the published
 description of the AI4I 2020 Predictive Maintenance Dataset (S. Matzka, 2020;
-[UCI ML Repository #601](https://archive.ics.uci.edu/dataset/601/ai4i+2020+predictive+maintenance+dataset),
-CC BY 4.0), so their thresholds are the rules that dataset's synthetic
-machine follows. `example` documents are **illustrative procedures written
-for this project**, not a real manufacturer's manual; the assistant is told
-to say so when it gives steps from them.
+[UCI #601](https://archive.ics.uci.edu/dataset/601/ai4i+2020+predictive+maintenance+dataset),
+CC BY 4.0). The `example` documents are **illustrative procedures written for
+this project**, not a real manufacturer's manual, and the assistant says so
+when it quotes them.
 
-**Adding documents.** Drop `.md` or `.txt` files into `knowledge/`. An
-optional front matter sets the metadata shown in citations:
+**Adding documents.** You can:
+
+- upload from the UI sidebar,
+- `POST /documents`,
+- or drop `.md` / `.txt` / `.pdf` files into `knowledge/`.
+
+Markdown can carry front matter:
 
 ```markdown
 ---
-title: Hydraulic Press Maintenance
-type: reference
-source: Vendor manual, rev. 3
+title: Hydraulic Press Manual
+type: reference        # or: example
+priority: 3            # higher wins in a conflict
+updated: 2026-09-15
 ---
 ```
 
-The index rebuilds itself on the next query (or run `python vector_store.py --rebuild`).
+Uploaded files go to `knowledge/uploads/`, which is git-ignored. Their metadata
+is stored in a `.meta.json` sidecar. Scanned PDFs without a text layer are
+flagged as needing OCR.
 
-## Setup
+## Quick start
+
+### Docker
+
+```bash
+cp .env.example .env            # set GEMINI_API_KEY (free: https://aistudio.google.com/apikey)
+docker compose up --build       # UI http://localhost:8501 · API http://localhost:8000/docs
+```
+
+The models are baked into the image, so the first start doesn't download anything.
+
+### Local
 
 ```bash
 python -m venv venv
-venv\Scripts\activate          # macOS/Linux: source venv/bin/activate
+venv\Scripts\activate                     # macOS/Linux: source venv/bin/activate
+pip install torch --index-url https://download.pytorch.org/whl/cpu
 pip install -r requirements.txt
+copy .env.example .env                    # macOS/Linux: cp; then set GEMINI_API_KEY
 
-copy .env.example .env         # macOS/Linux: cp .env.example .env
-# set GEMINI_API_KEY - free key at https://aistudio.google.com/apikey
+streamlit run app.py                      # chat UI
+python rag.py "Takım değişimi nasıl yapılır?"
+python vector_store.py "HDF"              # retrieval only: no LLM, no API key
+uvicorn api:app --reload                  # API, docs at /docs
 ```
 
-- `sentence-transformers` installs PyTorch. On Linux, install the CPU build
-  first to avoid a multi-GB CUDA download:
-  `pip install torch --index-url https://download.pytorch.org/whl/cpu`.
-- **Free-tier quota.** At the time of writing, the free tier allows
-  `gemini-3.8-flash` only **20 requests per day**, and each question uses 1-2
-  requests. When the daily quota runs out, the app stops with a clear message
-  instead of retrying for hours. To switch to another model, set `GEMINI_MODEL`
-  in `.env`, e.g. `gemini-3.5-flash`, which has a separate quota.
-- **Unreliable connections.** On some Windows machines, antivirus HTTPS
-  inspection, a VPN or an unstable connection makes TLS connections fail at
-  random (`SSL: INVALID_SESSION_ID`). On the development machine `curl` failed
-  the same way, so the cause is the network, not Python. `generator.py`
-  retries these up to 12 times on fresh connections, so a single answer can
-  take up to about a minute.
-- The embedding model (~470 MB) downloads on first use and is cached under
-  `~/.cache/huggingface`. Build the index ahead of time with
-  `python vector_store.py --rebuild`.
-
-## Usage
+The first query downloads the embedding model and the reranker (~1 GB in
+total), which are then cached.
 
 ```bash
-streamlit run app.py                        # chat UI at http://localhost:8501
-python rag.py "Takım değişimi nasıl yapılır?" # one question from the CLI
-python vector_store.py "HDF"                # retrieval only - no LLM, no API key needed
-uvicorn api:app --reload                    # HTTP API, docs at http://localhost:8000/docs
-```
-
-```bash
+curl "http://localhost:8000/search?q=OSF&mode=bm25"     # compare retrievers, no LLM
+curl -X POST http://localhost:8000/documents -F "file=@manual.pdf" -F "priority=3"
 curl -X POST http://localhost:8000/ask -H "Content-Type: application/json" \
   -d '{"question": "Peki kontrol adımları neler?",
-       "history": [{"question": "Soğutma sistemi ne zaman kontrol edilmeli?",
-                    "answer": "HDF arızaları arttığında [1]."}]}'
+       "history": [{"question": "Soğutma sistemi ne zaman kontrol edilmeli?", "answer": "..."}]}'
 ```
 
-The response contains `answer`, `search_query` (the condensed question that
-was actually searched), `sources` (every retrieved chunk, numbered as in the
-prompt, with similarity `score`), and `cited` (the numbers the answer uses).
+`/ask` returns:
+
+- `answer`
+- `sources`: every retrieved chunk, with its cosine, the ranks from each
+  retriever and the rerank score
+- `cited`: the `[n]` the answer actually uses
+- `conflict`
+- `search_query`: the condensed question
+
+### Configuration (`.env`)
+
+| Variable | Default | |
+|---|---|---|
+| `GEMINI_API_KEY` | (required) | |
+| `GEMINI_MODEL` | `gemini-3.8-flash` | The free tier currently allows only ~20 requests/day for this model. Another model, e.g. `gemini-3.5-flash`, has its own quota. |
+| `RETRIEVAL_MODE` | `hybrid_rerank` | `vector`, `bm25`, `hybrid` or `hybrid_rerank` |
+| `EMBED_MODEL` | `intfloat/multilingual-e5-small` | Changing it rebuilds the index automatically. Re-measure `MIN_SCORE` afterwards. |
+| `RERANK_MODEL` | `cross-encoder/mmarco-mMiniLMv2-L12-H384-v1` | |
 
 ## Testing and evaluation
 
 ```bash
 pip install -r requirements-dev.txt
-pytest                              # 52 tests, ~8 s, offline
-python -m evals.retrieval_eval      # retriever only: hit@k / MRR (offline, free)
-python -m evals.answer_eval         # full pipeline against the live Gemini API
+pytest                                       # 85 tests, ~15 s, offline
+python -m evals.retrieval_eval               # retriever comparison (offline, free)
+python -m evals.retrieval_eval --mode hybrid_rerank   # per-question detail
+python -m evals.answer_eval                  # end to end, against the live Gemini API
 ```
 
-- **Tests** use a deterministic hashing embedder and a fake LLM, so they need
-  no network, model download or API key. They cover chunking, index
-  build/rebuild/persistence, the pipeline (gate, condensing, citation
-  parsing, error handling), the Gemini retry policy, the API, and the eval grader.
-- **Retrieval eval** (20 labeled questions): is the section that answers the
-  question in the top k? Current result with multilingual-e5-small:
-  **hit@4 100%, hit@1 95%, MRR 0.975**. Treat this as optimistic, because the
-  questions were written alongside the documents.
-- **Answer eval** (14 cases, graded programmatically): the answer must cite
-  the right section (retrieving it isn't enough), must contain the key facts
-  (e.g. both HDF thresholds), and must refuse three out-of-scope questions:
-  near-domain, unrelated, and live data the documents don't contain. It also
-  covers one follow-up and one English question. LLM failures are reported as
-  `infra_error`, not as failures. Results go to `evals/results/answer_eval.json`
-  (re-run just those with `--retry-infra`; a partial re-run is merged into the
-  previous results).
+- **Unit tests** use a deterministic hashing embedder, a fake LLM and PDFs
+  generated in code, so they need no network, model download or API key. They
+  cover:
+  - chunking (Markdown, PDF, sidecars, unreadable files),
+  - the index (rebuild, persistence, uploads),
+  - hybrid retrieval and fusion,
+  - the pipeline (gate, condensing, citations, conflicts),
+  - the Gemini retry and quota policy,
+  - the API and the eval grader.
+- **Retrieval eval**: the table above. CI fails if the default mode's MRR drops
+  below 0.90 on either set.
+- **Answer eval** (16 cases, graded programmatically). An answer passes only if
+  it does all of the following:
+  - cites the right section (retrieving it isn't enough),
+  - contains the key facts (e.g. both HDF thresholds),
+  - refuses 3 out-of-scope questions,
+  - flags both conflict cases,
+  - raises no false conflict alarms elsewhere.
 
-  **Result (2026-10-08): 14/14 passed.** 8 cases ran on `gemini-3.8-flash`. The
-  other 6 ran on `gemini-3.5-flash`: 5 of them hit network or quota errors on
-  3.8, and 1 (`lockout_tagout`) was a grader bug. The answer correctly said
-  *"kilidinizi"*, but the grader looked for *"kilit"*, so Turkish consonant
-  mutation made it miss. Each row in the results file records the model it ran
-  on. The two near-domain refusals (`hidrolik pres` at 0.832, `bu ay kaç arıza`
-  at 0.840) passed the score gate, as the calibration predicted, and the prompt
-  rule caught them.
+  It also covers a follow-up and an English question. LLM or network failures
+  are recorded as `infra_error`, not as failures (`--retry-infra` re-runs them).
 
-Keeping the two evals separate tells you where a wrong answer came from:
-either the right section was never retrieved, or it was retrieved and the
-model didn't use it.
+  **Latest full run (2026-10-08, gemini-3.5-flash, hybrid + rerank): 11/11 graded
+  cases passed.** The other 5 cases hit the free tier's daily quota mid-run and
+  are recorded as `infra_error` in `evals/results/answer_eval.json`. All 5 had
+  passed in earlier runs the same day: the two conflict cases on this same
+  pipeline, the follow-up and two refusal cases on the earlier vector-only
+  retriever. Re-run them with `--retry-infra` once the quota resets.
+
+Keeping the evals separate tells you where a wrong answer came from: either the
+right section was never retrieved, or the model didn't use it.
+
+**CI** (`.github/workflows/ci.yml`) runs three jobs:
+
+1. the unit tests,
+2. the retrieval quality gate with the real models,
+3. a Docker build plus a smoke test that indexes the knowledge base and runs a
+   hybrid search inside the container.
+
+## Troubleshooting
+
+- **`SSL: INVALID_SESSION_ID` / slow answers on Windows.** Antivirus HTTPS
+  inspection, a VPN or an unstable connection can drop TLS connections at
+  random; on the development machine `curl` failed the same way. `generator.py`
+  retries up to 12 times on fresh connections, so an answer can take up to
+  about a minute.
+- **"Gemini quota exhausted … resets in about N h".** The free-tier daily quota
+  is used up. Wait for the reset, or set `GEMINI_MODEL` to another model.
 
 ## Project structure
 
 ```
-├── knowledge/            # the documents (Markdown / text)
-├── chunking.py           # load + split documents
-├── embeddings.py         # local multilingual embeddings
-├── vector_store.py       # ChromaDB index, auto-rebuild, search
-├── generator.py          # Gemini client with retries
-├── rag.py                # the RAG pipeline
-├── app.py                # Streamlit UI
-├── api.py                # FastAPI
-├── evals/                # retrieval_eval.py, answer_eval.py
-└── tests/                # pytest suite (offline)
+├── knowledge/              documents (uploads/ is git-ignored)
+├── chunking.py             load + split Markdown / text / PDF
+├── embeddings.py           local multilingual embeddings
+├── vector_store.py         ChromaDB index, auto-rebuild, uploads
+├── retriever.py            BM25 + vectors + RRF + cross-encoder
+├── rag.py                  the RAG pipeline
+├── generator.py            Gemini client with retries
+├── app.py · api.py         Streamlit UI · FastAPI
+├── evals/                  retrieval_eval.py, answer_eval.py, results/
+├── tests/                  85 offline tests
+├── Dockerfile · docker-compose.yml
+└── .github/workflows/ci.yml
 ```
 
 ## License

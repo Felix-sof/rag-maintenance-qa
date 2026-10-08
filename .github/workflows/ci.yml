@@ -1,0 +1,60 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  tests:
+    name: Unit tests (offline)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - name: Install dependencies (CPU-only PyTorch)
+        run: |
+          pip install torch --index-url https://download.pytorch.org/whl/cpu
+          pip install -r requirements-dev.txt
+      - name: Run tests
+        run: pytest -q
+
+  retrieval-quality:
+    name: Retrieval quality gate (real models, no LLM)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - name: Cache Hugging Face models
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/huggingface
+          key: hf-e5-small-mmarco-minilm-v1
+      - name: Install dependencies (CPU-only PyTorch)
+        run: |
+          pip install torch --index-url https://download.pytorch.org/whl/cpu
+          pip install -r requirements.txt
+      - name: Compare retrieval modes and fail below MRR 0.90
+        run: python -m evals.retrieval_eval --min-mrr 0.90
+
+  docker:
+    name: Docker image builds and answers a search
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build image (models baked in)
+        run: docker build -t rag-maintenance-qa .
+      - name: Smoke test - index the knowledge base and run a hybrid search inside the container
+        run: |
+          docker run --rm rag-maintenance-qa python -c "
+          from retriever import get_retriever
+          hits = get_retriever().search('HDF arızası hangi koşullarda oluşur?', top_k=1)
+          print(hits[0]['source'], '>', hits[0]['section'], hits[0]['score'])
+          assert 'HDF' in hits[0]['section'], hits[0]
+          "

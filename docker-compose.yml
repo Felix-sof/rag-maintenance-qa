@@ -1,0 +1,32 @@
+# docker compose up --build
+#   UI  -> http://localhost:8501
+#   API -> http://localhost:8000/docs
+#
+# Both services read the same knowledge/ folder (so uploads from either are
+# visible to both) but keep separate vector indexes: a ChromaDB persistent
+# index must not be written by two processes at once. Each one rebuilds
+# itself automatically when the documents change.
+
+services:
+  ui:
+    build: .
+    image: rag-maintenance-qa
+    ports: ["8501:8501"]
+    env_file: .env
+    volumes:
+      - ./knowledge:/app/knowledge
+      - ui-index:/app/data
+
+  api:
+    image: rag-maintenance-qa
+    depends_on: [ui]  # reuses the image built for ui
+    command: ["uvicorn", "api:app", "--host", "0.0.0.0", "--port", "8000"]
+    ports: ["8000:8000"]
+    env_file: .env
+    volumes:
+      - ./knowledge:/app/knowledge
+      - api-index:/app/data
+
+volumes:
+  ui-index:
+  api-index:
