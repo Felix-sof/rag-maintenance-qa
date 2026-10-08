@@ -1,0 +1,186 @@
+[
+  {
+    "id": "hdf_conditions",
+    "status": "pass",
+    "notes": [],
+    "question": "HDF arızası hangi koşullarda oluşur?",
+    "search_query": "HDF arızası hangi koşullarda oluşur?",
+    "answer": "HDF (Isı Dağıtım Arızası), proses ısısı yeterince dağıtılamadığında oluşur [1]. \n\nArızanın tetiklenmesi için aşağıdaki iki koşulun aynı anda ve birlikte sağlanması gerekmektedir:\n- Hava sıcaklığı ile proses sıcaklığı arasındaki farkın 8,6 K'nin altına düşmesi [1].\n- Dönüş hızının 1380 rpm'nin altında olması [1].",
+    "cited": [
+      1
+    ],
+    "top_score": 0.8916,
+    "elapsed_s": 45.9
+  },
+  {
+    "id": "pwf_power_band",
+    "status": "pass",
+    "notes": [],
+    "question": "Güç arızası hangi güç değerlerinde oluşur?",
+    "search_query": "Güç arızası hangi güç değerlerinde oluşur?",
+    "answer": "Güç arızası (PWF), proses gücü 3500 W'ın altına düştüğünde veya 9000 W'ı aştığında oluşur [1].",
+    "cited": [
+      1
+    ],
+    "top_score": 0.8759,
+    "elapsed_s": 30.8
+  },
+  {
+    "id": "osf_limit_l",
+    "status": "pass",
+    "notes": [],
+    "question": "L tipi ürünlerde aşırı zorlanma arızası sınırı nedir?",
+    "search_query": "L tipi ürünlerde aşırı zorlanma arızası sınırı nedir?",
+    "answer": "L (düşük kalite) tipi ürünlerde aşırı zorlanma arızası (OSF) sınırı 11.000 minNm'dir [1].",
+    "cited": [
+      1
+    ],
+    "top_score": 0.8966,
+    "elapsed_s": 9.4
+  },
+  {
+    "id": "osf_limit_h_english",
+    "status": "pass",
+    "notes": [],
+    "question": "What is the overstrain failure limit for H type products?",
+    "search_query": "What is the overstrain failure limit for H type products?",
+    "answer": "The overstrain failure (OSF) limit for H (high quality) type products is 13,000 minNm [1].",
+    "cited": [
+      1
+    ],
+    "top_score": 0.8424,
+    "elapsed_s": 5.8
+  },
+  {
+    "id": "twf_wear_window",
+    "status": "pass",
+    "notes": [],
+    "question": "Takım aşınması arızası hangi aşınma süresi aralığında olur?",
+    "search_query": "Takım aşınması arızası hangi aşınma süresi aralığında olur?",
+    "answer": "Takım aşınması arızası (TWF), takım aşınma süresi 200 ile 240 dakika arasında rastgele seçilen bir noktaya ulaştığında ortaya çıkar [2].",
+    "cited": [
+      2
+    ],
+    "top_score": 0.8923,
+    "elapsed_s": 21.2
+  },
+  {
+    "id": "twf_label_nuance",
+    "status": "pass",
+    "notes": [],
+    "question": "TWF etiketi her zaman takımın kırıldığını mı gösterir?",
+    "search_query": "TWF etiketi her zaman takımın kırıldığını mı gösterir?",
+    "answer": "Hayır, TWF etiketi her zaman fiziksel bir kırılma anlamına gelmez [1]. Veri setinde takımın değiştirildiği durumlar ile gerçekten kırıldığı durumlar aynı TWF etiketiyle işaretlenmektedir [1].",
+    "cited": [
+      1
+    ],
+    "top_score": 0.8918,
+    "elapsed_s": 22.1
+  },
+  {
+    "id": "tool_change_steps",
+    "status": "pass",
+    "notes": [],
+    "question": "Kesici takım nasıl değiştirilir, adımlar neler?",
+    "search_query": "Kesici takım nasıl değiştirilir, adımlar neler?",
+    "answer": "Kesici takım değişimi adımları şunlardır [1]:\n\n1. Tezgahı durdurun ve enerji izolasyonunu uygulayın (bkz. safety.md) [1].\n2. İş milinin tamamen durduğunu doğrulayın; takım ve iş parçası soğuyana kadar bekleyin [1].\n3. Takım tutucuyu sökün ve aşınmış takımı çıkarın; kırık takım parçası varsa iş parçası ve fikstürde kalıntı kontrolü yapın [1].\n4. Yeni takımı üretici tarafından belirtilen sıkma torkuyla takın [1].\n5. Takım ofsetini ölçün ve kontrol ünitesine girin [1].\n6. Takım aşınma sayacını sıfırlayın ve değişimi bakım kaydına işleyin [1].\n7. Deneme kesimi yapın ve ilk parçada boyut ve yüzey kontrolü yapın [1].\n\nNot: Bu prosedür örnek bir belgeden alınmıştır; tesisin kendi kılavuzu önceliklidir [1].",
+    "cited": [
+      1
+    ],
+    "top_score": 0.8902,
+    "elapsed_s": 31.2
+  },
+  {
+    "id": "high_torque_causes",
+    "status": "pass",
+    "notes": [],
+    "question": "Tork değerleri sürekli yüksek çıkıyor, olası nedenleri neler?",
+    "search_query": "Tork değerleri sürekli yüksek çıkıyor, olası nedenleri neler?",
+    "answer": "Tork değerlerinin yüksek çıkmasının olası nedenleri şunlardır [1]:\n\n1. Kesici takımın aşınmış veya körelmiş olması [1].\n2. Kesme parametrelerinin (ilerleme, kesme derinliği) malzeme için fazla agresif olması [1].\n3. Talaş tahliyesinin yetersiz olması ve talaşın sıkışması [1].\n4. Soğutma ve yağlamanın yetersiz olması [1].\n\n*Not: Başvurulan kaynak kılavuz örnek bir belge olduğundan, tesisin kendi orijinal kullanım ve bakım kılavuzu önceliklidir.*",
+    "cited": [
+      1
+    ],
+    "top_score": 0.8966,
+    "elapsed_s": 19.0,
+    "model": "gemini-3.5-flash"
+  },
+  {
+    "id": "lockout_tagout",
+    "status": "pass",
+    "notes": [],
+    "question": "Bakıma başlamadan önce enerji izolasyonu nasıl yapılır?",
+    "search_query": "Bakıma başlamadan önce enerji izolasyonu nasıl yapılır?",
+    "answer": "Bakıma başlamadan önce enerji izolasyonu (kilitleme / etiketleme) şu adımlarla gerçekleştirilir [1]:\n\n1. Tezgahı normal durdurma prosedürüyle durdurun [1].\n2. Ana şalteri kapatın ve kişisel kilidinizi takın [1].\n3. Üzerinde adınız, tarih ve yapılan işin yazdığı etiketi asın [1].\n4. Pnömatik ve hidrolik hatlardaki basıncı boşaltın [1].\n5. Tezgahı çalıştırmayı deneyerek enerjinin gerçekten kesildiğini doğrulayın, ardından kontrolü tekrar kapalı konuma alın [1].\n6. İş bitince kilidi ve etiketi yalnızca onu takan kişi çıkarır [1].\n\n*Not: Bu prosedür örnek bir belgeye dayanmaktadır; her zaman tesisin kendi orijinal kullanım kılavuzu ve iş güvenliği talimatları önceliklidir [2].*",
+    "cited": [
+      1,
+      2
+    ],
+    "top_score": 0.8866,
+    "elapsed_s": 3.8,
+    "model": "gemini-3.5-flash"
+  },
+  {
+    "id": "gloves_near_spindle",
+    "status": "pass",
+    "notes": [],
+    "question": "Dönen iş mili yakınında eldiven kullanılır mı?",
+    "search_query": "Dönen iş mili yakınında eldiven kullanılır mı?",
+    "answer": "Dönen iş mili yakınında dolanma riski nedeniyle eldiven kullanılmaz [1]. \n\n*Not: Tesisin kendi iş sağlığı ve güvenliği talimatları ile yasal mevzuat önceliklidir [3].*",
+    "cited": [
+      1,
+      3
+    ],
+    "top_score": 0.8453,
+    "elapsed_s": 7.0,
+    "model": "gemini-3.5-flash"
+  },
+  {
+    "id": "followup_cooling_steps",
+    "status": "pass",
+    "notes": [],
+    "question": "Peki kontrol adımları neler?",
+    "search_query": "Soğutma sisteminin kontrol adımları nelerdir?",
+    "answer": "Soğutma sisteminin kontrol adımları aşağıda belirtilmiştir [1]:\n\n1. Soğutma sıvısı seviyesini ve konsantrasyonunu kontrol edin [1].\n2. Soğutma pompasının basıncını ve debisini kontrol edin [1].\n3. Nozulların tıkalı olup olmadığını ve kesme bölgesine doğru yönlendirildiğini kontrol edin [1].\n4. Fan ve hava kanallarını tozdan arındırın; ısı eşanjörü yüzeylerini temizleyin [1].\n5. Ortam sıcaklığını kontrol edin [1].\n6. Düşük devirde uzun süreli çalışma gerekiyorsa ek soğutma veya proses parametresi değişikliği değerlendirin [1].\n\n*Not: Bu adımlar örnek bir belgeye dayandığı için tesisin kendi orijinal kullanım kılavuzu önceliklidir [1].*",
+    "cited": [
+      1
+    ],
+    "top_score": 0.898,
+    "elapsed_s": 10.9,
+    "model": "gemini-3.5-flash"
+  },
+  {
+    "id": "out_of_scope_near",
+    "status": "pass",
+    "notes": [],
+    "question": "Hidrolik presin yağ değişimi nasıl yapılır?",
+    "search_query": "Hidrolik presin yağ değişimi nasıl yapılır?",
+    "answer": "Bilgi bankasında bu sorunun cevabı yok.",
+    "cited": [],
+    "top_score": 0.8318,
+    "elapsed_s": 6.4,
+    "model": "gemini-3.5-flash"
+  },
+  {
+    "id": "out_of_scope_far",
+    "status": "pass",
+    "notes": [],
+    "question": "En iyi pizza tarifi nedir?",
+    "search_query": "En iyi pizza tarifi nedir?",
+    "answer": "Bilgi bankasında bu sorunun cevabı yok.",
+    "cited": [],
+    "top_score": 0.7844,
+    "elapsed_s": 0.1
+  },
+  {
+    "id": "out_of_scope_live_data",
+    "status": "pass",
+    "notes": [],
+    "question": "Bu ay fabrikada kaç arıza oldu?",
+    "search_query": "Bu ay fabrikada kaç arıza oldu?",
+    "answer": "Bilgi bankasında bu sorunun cevabı yok.",
+    "cited": [],
+    "top_score": 0.8397,
+    "elapsed_s": 10.4,
+    "model": "gemini-3.5-flash"
+  }
+]
