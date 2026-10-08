@@ -86,26 +86,45 @@ class VectorStore:
             "embedding_model": self.embedder.name,
         }
 
-    def search(self, query: str, top_k: int = 4) -> list[dict]:
-        """Return the top_k most similar chunks, best first, with cosine similarity as `score`."""
+    def index_fingerprint(self) -> str:
+        """Fingerprint of the index currently loaded (changes whenever it is rebuilt)."""
+        return (self._get_collection().metadata or {}).get("fingerprint", "")
+
+    def all_chunks(self) -> list[dict]:
+        """Every indexed chunk with its stored embedding (used to build the keyword index)."""
         collection = self._get_collection()
         if collection.count() == 0:
             return []
-        top_k = max(1, min(int(top_k), MAX_TOP_K, collection.count()))
+        res = collection.get(include=["documents", "metadatas", "embeddings"])
+        return [
+            {"id": id_, "text": doc, "embedding": list(emb), **meta}
+            for id_, doc, meta, emb in zip(res["ids"], res["documents"], res["metadatas"], res["embeddings"])
+        ]
+
+    def search(self, query: str, top_k: int = 4) -> list[dict]:
+        """Return the top_k most similar chunks, best first, with cosine similarity as `score`."""
+        return self.search_by_vector(self.embedder.embed_query(query), top_k)
+
+    def search_by_vector(self, query_vector: list[float], top_k: int = 4, max_k: int = MAX_TOP_K) -> list[dict]:
+        collection = self._get_collection()
+        if collection.count() == 0:
+            return []
+        top_k = max(1, min(int(top_k), max_k, collection.count()))
         res = collection.query(
-            query_embeddings=[self.embedder.embed_query(query)],
+            query_embeddings=[query_vector],
             n_results=top_k,
             include=["documents", "metadatas", "distances"],
         )
         return [
             {
+                "id": id_,
                 "source": meta["source"],
                 "section": meta["section"],
                 "doc_type": meta["doc_type"],
                 "score": round(1 - dist, 4),
                 "text": doc,
             }
-            for doc, meta, dist in zip(res["documents"][0], res["metadatas"][0], res["distances"][0])
+            for id_, doc, meta, dist in zip(res["ids"][0], res["documents"][0], res["metadatas"][0], res["distances"][0])
         ]
 
 

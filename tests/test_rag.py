@@ -28,7 +28,7 @@ def test_context_is_numbered_and_marks_example_documents():
 class TestAnswer:
     def test_answers_from_context_and_reports_cited_sources(self):
         gen = FakeGenerator("HDF düşük devirde oluşur [1].")
-        out = rag.answer("HDF nedir?", store=StubStore(RELEVANT), generator=gen)
+        out = rag.answer("HDF nedir?", retriever=StubStore(RELEVANT), generator=gen)
 
         assert out["answer"] == "HDF düşük devirde oluşur [1]."
         assert out["cited"] == [1]
@@ -42,13 +42,13 @@ class TestAnswer:
 
     def test_off_topic_question_is_refused_without_calling_the_llm(self):
         gen = FakeGenerator()
-        out = rag.answer("Pizza tarifi?", store=StubStore([make_hit(rag.MIN_SCORE - 0.01)]), generator=gen)
+        out = rag.answer("Pizza tarifi?", retriever=StubStore([make_hit(rag.MIN_SCORE - 0.01)]), generator=gen)
         assert out["answer"] == rag.NO_ANSWER
         assert out["cited"] == []
         assert gen.calls == []
 
     def test_empty_index_is_refused(self):
-        out = rag.answer("HDF?", store=StubStore([]), generator=FakeGenerator())
+        out = rag.answer("HDF?", retriever=StubStore([]), generator=FakeGenerator())
         assert out["answer"] == rag.NO_ANSWER
 
     def test_follow_up_is_condensed_before_retrieval(self):
@@ -56,7 +56,7 @@ class TestAnswer:
         store = StubStore(RELEVANT)
         history = [{"question": "Takım ne zaman değiştirilir?", "answer": "Aşınınca [1]."}]
 
-        out = rag.answer("Peki adımları neler?", history=history, store=store, generator=gen)
+        out = rag.answer("Peki adımları neler?", history=history, retriever=store, generator=gen)
 
         assert store.queries == ["Kesici takım değişiminin adımları nelerdir?"]
         assert out["search_query"] == "Kesici takım değişiminin adımları nelerdir?"
@@ -65,16 +65,24 @@ class TestAnswer:
 
     def test_standalone_question_skips_condensing(self):
         gen = FakeGenerator("Cevap [1].")
-        rag.answer("HDF nedir?", store=StubStore(RELEVANT), generator=gen)
+        rag.answer("HDF nedir?", retriever=StubStore(RELEVANT), generator=gen)
         assert len(gen.calls) == 1
 
     def test_llm_failure_is_reported_not_raised(self):
         gen = FakeGenerator(error=GenerationError("Gemini API error (429): quota"))
-        out = rag.answer("HDF nedir?", store=StubStore(RELEVANT), generator=gen)
+        out = rag.answer("HDF nedir?", retriever=StubStore(RELEVANT), generator=gen)
         assert out["error"] is True
         assert "429" in out["answer"]
 
-    def test_uses_process_wide_store_and_generator_by_default(self):
+    def test_gate_uses_best_cosine_not_first_rank(self):
+        # a reranker may put a lower-cosine chunk first; the off-topic gate must still pass
+        hits = [make_hit(rag.MIN_SCORE - 0.05), make_hit(rag.MIN_SCORE + 0.05, section="Arızalar > PWF")]
+        gen = FakeGenerator("Cevap [2].")
+        out = rag.answer("PWF?", retriever=StubStore(hits), generator=gen)
+        assert out["answer"] == "Cevap [2]."
+        assert len(gen.calls) == 1
+
+    def test_uses_process_wide_retriever_and_generator_by_default(self):
         # autouse fixture: real knowledge/ docs + FakeGenerator; hash-embedder scores are
         # far below MIN_SCORE, so this exercises the wiring, not answer quality
         out = rag.answer("HDF arızası")

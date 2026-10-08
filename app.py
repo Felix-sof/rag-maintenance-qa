@@ -8,6 +8,7 @@ import streamlit as st
 
 import rag
 from generator import MODEL
+from retriever import get_retriever
 from vector_store import get_store
 
 st.set_page_config(page_title="Bakım Asistanı (RAG)", page_icon="🛠️", layout="wide")
@@ -26,7 +27,7 @@ with st.sidebar:
     try:
         stats = get_store().stats()
         st.metric("Belge / parça", f"{stats['documents']} / {stats['chunks']}")
-        st.caption(f"Embedding: `{stats['embedding_model']}`")
+        st.caption(f"Embedding: `{stats['embedding_model']}` · Arama: `{get_retriever().mode}`")
         if st.button("🔄 Yeniden indeksle"):
             with st.spinner("İndeksleniyor..."):
                 get_store().build(force=True)
@@ -54,7 +55,13 @@ def render_sources(result: dict) -> None:
         for src in sources:
             used = "✅" if src["n"] in result["cited"] else "▫️"
             example = " · örnek belge" if src["doc_type"] == "example" else ""
+            ranks = src.get("ranks") or {}
+            found_by = " · ".join(
+                f"{label} #{ranks[key]}" for key, label in (("vector", "vektör"), ("bm25", "BM25")) if ranks.get(key)
+            )
             st.markdown(f"{used} **[{src['n']}] {src['source']} › {src['section']}** — benzerlik {src['score']:.3f}{example}")
+            if found_by:
+                st.caption(f"Bulan: {found_by}" + (f" · reranker skoru {ranks['rerank']:.2f}" if ranks.get("rerank") is not None else ""))
             st.caption(src["text"][:500] + ("…" if len(src["text"]) > 500 else ""))
 
 

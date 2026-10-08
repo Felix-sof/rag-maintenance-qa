@@ -49,7 +49,7 @@ class FakeGenerator:
 
 
 class StubStore:
-    """A vector store that returns fixed hits and records the queries it receives."""
+    """A retriever that returns fixed hits and records the queries it receives."""
 
     def __init__(self, hits):
         self.hits = hits
@@ -68,9 +68,12 @@ def make_hit(score, source="failure_modes.md", section="Arızalar > HDF", doc_ty
 def offline(monkeypatch, tmp_path):
     """Point the app at a temp index of the real knowledge/ docs and a fake LLM."""
     import generator
+    import retriever
     import vector_store
 
     store = vector_store.VectorStore(index_dir=tmp_path / "index", embedder=HashEmbedder())
     monkeypatch.setattr(vector_store, "_store", store)
+    # hybrid without the cross-encoder: no model download in tests
+    monkeypatch.setattr(retriever, "_retriever", retriever.Retriever(store=store, mode="hybrid"))
     monkeypatch.setattr(generator, "_generator", FakeGenerator())
     yield

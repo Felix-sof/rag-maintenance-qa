@@ -4,7 +4,8 @@ The RAG pipeline: question -> retrieve -> augment -> generate -> cited answer.
     1. Condense   - a follow-up like "peki adımları neler?" is meaningless to
                     the retriever on its own; with conversation history, the
                     LLM first rewrites it as a standalone question.
-    2. Retrieve   - top-k chunks from the vector store.
+    2. Retrieve   - top-k chunks via hybrid search (vectors + BM25, fused,
+                    re-ranked by a cross-encoder - see retriever.py).
     3. Gate       - if even the best chunk scores below MIN_SCORE, the
                     question is off-topic: answer "not in the knowledge base"
                     without calling the LLM at all.
@@ -20,12 +21,13 @@ import re
 import sys
 
 from generator import GenerationError, get_generator
-from vector_store import get_store
+from retriever import get_retriever
 
 DEFAULT_TOP_K = 4
 MAX_HISTORY_TURNS = 4
 
-# Cosine-similarity floor for the best retrieved chunk. multilingual-e5 scores
+# Cosine-similarity floor for the best retrieved chunk (always the embedding
+# cosine, whichever retrieval mode ranked the chunks). multilingual-e5 scores
 # are compressed into a narrow band, so this only catches clearly off-topic
 # questions. Measured with intfloat/multilingual-e5-small on this knowledge
 # base: in-scope questions scored 0.838-0.896, clearly unrelated ones
@@ -97,7 +99,7 @@ def condense_question(question: str, history: list[dict], generator) -> str:
     return rewritten or question
 
 
-def answer(question: str, history: list[dict] = None, top_k: int = DEFAULT_TOP_K, store=None, generator=None) -> dict:
+def answer(question: str, history: list[dict] = None, top_k: int = DEFAULT_TOP_K, retriever=None, generator=None) -> dict:
     """Answer a question from the knowledge base.
 
     `history` is a list of previous {"question", "answer"} turns (oldest
@@ -108,7 +110,7 @@ def answer(question: str, history: list[dict] = None, top_k: int = DEFAULT_TOP_K
     uses), "search_query" (the question after condensing), and "error"
     (True only if the LLM call failed).
     """
-    store = store or get_store()
+    retriever = retriever or get_retriever()
     generator = generator or get_generator()
     result = {"question": question, "search_query": question, "answer": "", "sources": [], "cited": [], "error": False}
 
@@ -116,9 +118,9 @@ def answer(question: str, history: list[dict] = None, top_k: int = DEFAULT_TOP_K
         search_query = condense_question(question, history, generator) if history else question
         result["search_query"] = search_query
 
-        hits = store.search(search_query, top_k=top_k)
+        hits = retriever.search(search_query, top_k=top_k)
         result["sources"] = [{"n": n, **hit} for n, hit in enumerate(hits, start=1)]
-        if not hits or hits[0]["score"] < MIN_SCORE:
+        if not hits or max(h["score"] for h in hits) < MIN_SCORE:
             result["answer"] = NO_ANSWER
             return result
 

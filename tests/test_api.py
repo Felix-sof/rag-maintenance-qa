@@ -23,6 +23,14 @@ def test_search_returns_ranked_hits(client):
     assert scores == sorted(scores, reverse=True)
 
 
+def test_search_can_compare_modes(client):
+    body = client.get("/search", params={"q": "OSF", "mode": "bm25", "top_k": 1}).json()
+    assert body["mode"] == "bm25"
+    assert body["results"][0]["ranks"]["bm25"] == 1
+    assert "osf" in body["results"][0]["text"].lower()
+    assert client.get("/search", params={"q": "x", "mode": "magic"}).status_code == 422
+
+
 def test_ask_passes_history_and_top_k(client, monkeypatch):
     seen = {}
 
