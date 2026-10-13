@@ -42,6 +42,8 @@ jobs:
           pip install -r requirements.txt
       - name: Compare retrieval modes and fail below MRR 0.90
         run: python -m evals.retrieval_eval --min-mrr 0.90
+      - name: Compare off-topic gates and fail if an in-scope question is refused
+        run: python -m evals.gate_eval --check
 
   docker:
     name: Docker image builds and answers a search

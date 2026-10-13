@@ -33,6 +33,9 @@ locally on CPU; generation uses the Google Gemini free tier.
 - **Grounded answers**: every claim is cited as `[n]`. Off-topic questions are
   refused by a score gate before any LLM call, and near-domain gaps are refused
   by the prompt.
+- **Numbers are checked, not trusted**: every number in an answer must appear in
+  a source it cites. A threshold the model made up, or took from a passage it
+  didn't cite, is flagged without a second LLM call.
 - **Conflict handling**: documents carry a priority and a revision date. Conflicting
   sources are flagged (`⚠️ Çelişki:`) with both versions cited, then resolved by
   priority and then by recency.
@@ -40,8 +43,9 @@ locally on CPU; generation uses the Google Gemini free tier.
   citations point at the page.
 - **Follow-up questions**: "Peki adımları neler?" is rewritten into a standalone
   question before retrieval.
-- **Measured, not assumed**: a retrieval eval with a CI quality gate, an end-to-end
-  answer eval against the live LLM, and 85 offline unit tests.
+- **Measured, not assumed**: a retrieval eval and an off-topic gate eval, both
+  with a CI quality gate, an end-to-end answer eval against the live LLM, and
+  107 offline unit tests.
 
 ## Architecture
 
@@ -56,10 +60,11 @@ locally on CPU; generation uses the Google Gemini free tier.
  ──────────────────
  question ─► condense ─► retrieve ─────────────────────────► gate ─► generate ─► verify
              follow-ups   retriever.py:                       best     Gemini:    which [n]
-             into a       vectors ─┐                          cosine   context    were cited?
-             standalone   BM25 ────┴► RRF fusion ─► cross-    < 0.80   only, cite  conflict
-             question                               encoder   → "not   [n], flag   flagged?
-                                                    rerank    in KB"   conflicts
+             into a       vectors ─┐                          rerank   context    were cited?
+             standalone   BM25 ────┴► RRF fusion ─► cross-    score    only, cite  conflict
+             question                               encoder   < -5.0   [n], flag   flagged?
+                                                    rerank    → "not   conflicts   numbers in
+                                                              in KB"               the sources?
 ```
 
 | File | Role |
@@ -68,9 +73,10 @@ locally on CPU; generation uses the Google Gemini free tier.
 | `embeddings.py` | [`intfloat/multilingual-e5-small`](https://huggingface.co/intfloat/multilingual-e5-small) with E5's `query:`/`passage:` prefixes. |
 | `vector_store.py` | Persistent ChromaDB index, fingerprinted on documents + model + chunk size and rebuilt automatically. Handles upload and delete, with path-traversal-safe names and deletion limited to `uploads/`. |
 | `retriever.py` | Hybrid search: BM25 with Turkish-aware lowercasing and first-5-character stemming, RRF fusion, and a cross-encoder rerank of the shortlist. |
-| `rag.py` | The pipeline: condense → retrieve → gate → generate → verify citations and conflicts. |
+| `rag.py` | The pipeline: condense → retrieve → gate → generate → verify citations, conflicts and numbers. |
+| `grounding.py` | The number check: compares every number in the answer, by value (`8,6` = `8.6`, `13.000` = `13,000`), with the passages it cites. |
 | `generator.py` | Gemini client. Retries 429/5xx and dropped TLS connections on fresh clients, and fails fast when the daily quota is exhausted. |
-| `app.py` | Streamlit chat UI: cited answers, conflict warnings, source inspector (which retriever found each chunk and its rerank score), document upload and delete. |
+| `app.py` | Streamlit chat UI: cited answers, conflict and unsupported-number warnings, source inspector (which retriever found each chunk and its rerank score), document upload and delete. |
 | `api.py` | FastAPI: `/ask`, `/search` (with `?mode=` to compare retrievers), `/documents` (GET/POST/DELETE), `/health`. |
 
 ## Design decisions, with numbers
@@ -109,19 +115,62 @@ also has to follow Turkish rules (`I` → `ı`, `İ` → `i`).
 
 ### Why two layers of refusal
 
-The score gate was calibrated by measuring real cosine similarities, and on its
-own it can't do the job. multilingual-e5 squeezes all scores into a narrow band:
+A score gate refuses a question before any LLM call when even the best retrieved
+chunk is a weak match. Two signals could carry it: the embedding cosine, or the
+cross-encoder's rerank score. `evals/gate_eval.py` measures both on 130
+questions, and on its own neither can do the job:
 
-| Question | Top cosine |
-|---|---|
-| Covered by the documents | 0.838 - 0.896 |
-| Unrelated ("pizza tarifi", "Türkiye'nin başkenti") | 0.738 - 0.799 |
-| Same domain, not covered ("hidrolik pres yağ değişimi", "bu ay kaç arıza oldu") | 0.810 - 0.839 |
+| Question | Best cosine | Best rerank score |
+|---|---|---|
+| Covered by the documents (75) | 0.764 to 0.913 | -4.58 to 10.42 |
+| Same domain, not covered ("hidrolik pres yağ değişimi", "bu ay kaç arıza oldu") (32) | 0.764 to 0.865 | -9.63 to -0.08 |
+| Unrelated ("pizza tarifi", "Türkiye'nin başkenti") (23) | 0.693 to 0.808 | -7.90 to -2.86 |
 
-The last row overlaps the first, so no threshold separates them. `MIN_SCORE =
-0.80` rejects clearly unrelated questions without calling the LLM, and the
-prompt rule catches near-domain gaps. The gate always uses the embedding cosine,
-whichever retriever ranked the chunks.
+The rows overlap on both signals, so no threshold separates them. What a gate
+can do is stop the clearest cases without refusing a question the documents
+answer. Questions refused before the LLM:
+
+| Gate | Covered (wrongly refused) | Same domain, not covered | Unrelated |
+|---|---|---|---|
+| cosine < 0.80 | 4 / 75 | 5 / 32 | 20 / 23 |
+| **rerank < -5.0** (default) | **0 / 75** | 11 / 32 | 15 / 23 |
+
+The cosine gate, which this project used first, refuses four covered questions
+phrased unlike the documents: "KKD listesi", "Rulmandan ses geliyor" and two
+English ones. multilingual-e5 squeezes every score into a narrow band, and a
+paraphrase or a cross-lingual question lands in the same band as "kahve nasıl
+demlenir". The reranker reads the question and the chunk together; its gate
+refuses no covered question and stops about as many of the others overall (26
+of 55 against 25), more of the near-domain ones and fewer of the unrelated.
+Whatever passes the gate goes to the LLM, where the prompt rule refuses it. That
+costs a call, not a wrong answer.
+
+The threshold was chosen on 85 of the questions and then checked on 45 written
+afterwards: 0 of their 25 covered questions were refused. The margin is thin
+all the same (the lowest covered question scores -4.58), and all the questions
+come from one author. CI fails if the gate refuses any covered question. Modes
+without a reranker fall back to the cosine gate.
+
+### Checking the numbers in an answer
+
+Citations show where an answer says it comes from, not that the source says the
+same thing. For a maintenance answer the costly case is a number: a limit or a
+threshold that reads plausibly, carries a `[n]`, and is in no passage. Numbers
+are also the one kind of claim that can be compared exactly, so `grounding.py`
+checks each one against the passages the answer cites, with no second LLM call:
+
+- by value, not spelling: `8,6` = `8.6`, and `13.000` = `13,000` = `13 000`;
+- against the cited passages only: a number from a passage that was retrieved
+  but not cited counts as unsupported;
+- numbers from the question itself are allowed, as are citation markers and
+  list numbering.
+
+Unsupported numbers are returned by `/ask`, shown as a warning in the UI, and
+fail the case in the answer eval. Replayed over the 10 recorded live answers
+that state a source, the check raises no false alarm; with a threshold in those
+answers changed by hand (1380 to 1500 rpm, 8,6 to 8,2 K, and four more) it
+catches every one. It can't judge a claim without a number, and it flags a
+count the model made itself ("şu 4 neden"), because no passage states it.
 
 ### Conflicting sources
 
@@ -222,6 +271,8 @@ curl -X POST http://localhost:8000/ask -H "Content-Type: application/json" \
   retriever and the rerank score
 - `cited`: the `[n]` the answer actually uses
 - `conflict`
+- `unsupported_numbers`: numbers in the answer that none of its cited sources
+  contain (empty when everything checks out)
 - `search_query`: the condensed question
 
 ### Configuration (`.env`)
@@ -232,15 +283,16 @@ curl -X POST http://localhost:8000/ask -H "Content-Type: application/json" \
 | `GEMINI_MODEL` | `gemini-3.8-flash` | The free tier currently allows only ~20 requests/day for this model. Another model, e.g. `gemini-3.5-flash`, has its own quota. |
 | `RETRIEVAL_MODE` | `hybrid_rerank` | `vector`, `bm25`, `hybrid` or `hybrid_rerank` |
 | `EMBED_MODEL` | `intfloat/multilingual-e5-small` | Changing it rebuilds the index automatically. Re-measure `MIN_SCORE` afterwards. |
-| `RERANK_MODEL` | `cross-encoder/mmarco-mMiniLMv2-L12-H384-v1` | |
+| `RERANK_MODEL` | `cross-encoder/mmarco-mMiniLMv2-L12-H384-v1` | `MIN_RERANK_SCORE` is on this model's score scale. Re-measure it with `python -m evals.gate_eval` if you change the model. |
 
 ## Testing and evaluation
 
 ```bash
 pip install -r requirements-dev.txt
-pytest                                       # 85 tests, ~15 s, offline
+pytest                                       # 107 tests, ~15 s, offline
 python -m evals.retrieval_eval               # retriever comparison (offline, free)
 python -m evals.retrieval_eval --mode hybrid_rerank   # per-question detail
+python -m evals.gate_eval                    # off-topic gate comparison (offline, free)
 python -m evals.answer_eval                  # end to end, against the live Gemini API
 ```
 
@@ -251,17 +303,21 @@ python -m evals.answer_eval                  # end to end, against the live Gemi
   - the index (rebuild, persistence, uploads),
   - hybrid retrieval and fusion,
   - the pipeline (gate, condensing, citations, conflicts),
+  - the number check,
   - the Gemini retry and quota policy,
   - the API and the eval grader.
 - **Retrieval eval**: the table above. CI fails if the default mode's MRR drops
   below 0.90 on either set.
+- **Gate eval**: the refusal table above. CI fails if the gate refuses a
+  question the documents cover.
 - **Answer eval** (16 cases, graded programmatically). An answer passes only if
   it does all of the following:
   - cites the right section (retrieving it isn't enough),
   - contains the key facts (e.g. both HDF thresholds),
   - refuses 3 out-of-scope questions,
   - flags both conflict cases,
-  - raises no false conflict alarms elsewhere.
+  - raises no false conflict alarms elsewhere,
+  - states no number that its cited sources don't contain.
 
   It also covers a follow-up and an English question. LLM or network failures
   are recorded as `infra_error`, not as failures (`--retry-infra` re-runs them).
@@ -279,7 +335,7 @@ right section was never retrieved, or the model didn't use it.
 **CI** (`.github/workflows/ci.yml`) runs three jobs:
 
 1. the unit tests,
-2. the retrieval quality gate with the real models,
+2. the retrieval quality gate and the off-topic gate check with the real models,
 3. a Docker build plus a smoke test that indexes the knowledge base and runs a
    hybrid search inside the container.
 
@@ -302,10 +358,11 @@ right section was never retrieved, or the model didn't use it.
 ├── vector_store.py         ChromaDB index, auto-rebuild, uploads
 ├── retriever.py            BM25 + vectors + RRF + cross-encoder
 ├── rag.py                  the RAG pipeline
+├── grounding.py            number check on the answer
 ├── generator.py            Gemini client with retries
 ├── app.py · api.py         Streamlit UI · FastAPI
-├── evals/                  retrieval_eval.py, answer_eval.py, results/
-├── tests/                  85 offline tests
+├── evals/                  retrieval_eval.py, gate_eval.py, answer_eval.py, results/
+├── tests/                  107 offline tests
 ├── Dockerfile · docker-compose.yml
 └── .github/workflows/ci.yml
 ```

@@ -15,8 +15,9 @@ Modes (RETRIEVAL_MODE env var): vector | bm25 | hybrid | hybrid_rerank.
 `python -m evals.retrieval_eval` compares all four.
 
 Every returned hit keeps `score` = cosine similarity to the query (computed
-from the stored embedding even for keyword-only hits), so rag.py's
-off-topic gate means the same thing in every mode.
+from the stored embedding even for keyword-only hits), so rag.py's cosine
+gate means the same thing in every mode that uses it. In hybrid_rerank mode
+the gate reads the cross-encoder's score (`ranks.rerank`) instead.
 """
 
 import os
