@@ -90,6 +90,15 @@ with st.sidebar:
         st.rerun()
 
 
+def render_unsupported_numbers(result: dict) -> None:
+    numbers = result.get("unsupported_numbers")
+    if numbers:
+        st.warning(
+            f"Cevaptaki şu değerler atıf yapılan kaynaklarda bulunamadı: **{', '.join(numbers)}**. "
+            "Uygulamadan önce kaynak belgeden doğrulayın."
+        )
+
+
 def render_sources(result: dict) -> None:
     sources = result["sources"]
     if not sources:
@@ -119,6 +128,7 @@ for turn in st.session_state.turns:
         if turn["result"].get("conflict"):
             st.warning("Kaynaklar bu konuda birbiriyle çelişiyor.")
         st.markdown(turn["answer"])
+        render_unsupported_numbers(turn["result"])
         render_sources(turn["result"])
 
 question = st.chat_input("Örn: HDF arızası hangi koşullarda oluşur? / Takım değişimi nasıl yapılır?")
@@ -135,6 +145,7 @@ if question:
             if result["conflict"]:
                 st.warning("Kaynaklar bu konuda birbiriyle çelişiyor. Cevaptaki iki versiyonu ve hangisinin neden geçerli sayıldığını kontrol edin.")
             st.markdown(result["answer"])
+            render_unsupported_numbers(result)
         render_sources(result)
 
     if not result["error"]:  # a failed turn would only confuse the next follow-up

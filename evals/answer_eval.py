@@ -23,7 +23,8 @@ Checks per case:
                       Every other case must NOT flag one - a false alarm on
                       agreeing sources is a failure too.
 
-Any answer that isn't a refusal must cite at least one source.
+Any answer that isn't a refusal must cite at least one source, and every
+number it states must be in a source it cites (grounding.py).
 A case whose LLM call failed (quota, network) is reported as infra_error and
 not graded - that's infrastructure noise, not a signal about the pipeline.
 
@@ -128,7 +129,7 @@ CASES = [
         "expect_no_answer": True,
     },
     {
-        "id": "out_of_scope_far",  # unrelated: the MIN_SCORE gate should catch it
+        "id": "out_of_scope_far",  # unrelated: the off-topic gate should catch it
         "question": "En iyi pizza tarifi nedir?",
         "expect_no_answer": True,
     },
@@ -202,6 +203,9 @@ def grade(case: dict, out: dict) -> tuple[str, list[str]]:
     if not case.get("expect_conflict") and out["conflict"]:
         notes.append("flagged a conflict between sources that agree")
 
+    if out.get("unsupported_numbers"):
+        notes.append(f"states numbers that none of its cited sources contain: {out['unsupported_numbers']}")
+
     return ("fail" if notes else "pass"), notes
 
 
@@ -246,6 +250,7 @@ def run(only: set = None) -> list[dict]:
                 "answer": out["answer"],
                 "cited": out["cited"],
                 "conflict": out["conflict"],
+                "unsupported_numbers": out["unsupported_numbers"],
                 "top_score": max((s["score"] for s in out["sources"]), default=None),
                 "elapsed_s": round(time.monotonic() - start, 1),
                 "model": MODEL,

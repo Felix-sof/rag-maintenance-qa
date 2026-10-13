@@ -54,6 +54,18 @@ class TestAnswer:
         out = rag.answer("HDF?", retriever=StubStore(RELEVANT), generator=FakeGenerator("Cevap [1]."))
         assert out["conflict"] is False
 
+    def test_number_missing_from_the_cited_source_is_reported(self):
+        hits = [make_hit(0.89, text="Hız 1380 rpm'nin altındadır."), make_hit(0.85, text="Sınır 1500 rpm'dir.")]
+        gen = FakeGenerator("Hız 1500 rpm'nin altında olmalıdır [1].")
+        out = rag.answer("HDF hangi hızda oluşur?", retriever=StubStore(hits), generator=gen)
+        assert out["unsupported_numbers"] == ["1500"]  # retrieved as [2], but the answer cites [1]
+
+    def test_grounded_numbers_are_not_reported(self):
+        hits = [make_hit(0.89, text="Hız 1380 rpm'nin altındadır.")]
+        gen = FakeGenerator("1. Hız 1380 rpm'nin altında olmalıdır [1].")
+        out = rag.answer("HDF hangi hızda oluşur?", retriever=StubStore(hits), generator=gen)
+        assert out["unsupported_numbers"] == []
+
     def test_off_topic_question_is_refused_without_calling_the_llm(self):
         gen = FakeGenerator()
         out = rag.answer("Pizza tarifi?", retriever=StubStore([make_hit(rag.MIN_SCORE - 0.01)]), generator=gen)
@@ -95,6 +107,28 @@ class TestAnswer:
         out = rag.answer("PWF?", retriever=StubStore(hits), generator=gen)
         assert out["answer"] == "Cevap [2]."
         assert len(gen.calls) == 1
+
+    def test_reranker_score_decides_when_there_is_one(self):
+        # in scope but phrased unlike the documents: low cosine, yet the cross-encoder sees the match
+        reranked = {**make_hit(rag.MIN_SCORE - 0.04), "ranks": {"rerank": rag.MIN_RERANK_SCORE + 1}}
+        gen = FakeGenerator("Cevap [1].")
+        out = rag.answer("Rulmandan ses geliyor", retriever=StubStore([reranked]), generator=gen)
+        assert out["answer"] == "Cevap [1]."
+
+    def test_low_reranker_score_is_refused_despite_a_high_cosine(self):
+        hits = [
+            {**make_hit(rag.MIN_SCORE + 0.03), "ranks": {"rerank": rag.MIN_RERANK_SCORE - 0.1}},
+            {**make_hit(rag.MIN_SCORE + 0.05), "ranks": {"rerank": rag.MIN_RERANK_SCORE - 2}},
+        ]
+        gen = FakeGenerator()
+        out = rag.answer("Bu ay kaç arıza oldu?", retriever=StubStore(hits), generator=gen)
+        assert out["answer"] == rag.NO_ANSWER
+        assert gen.calls == []
+
+    def test_hits_without_a_reranker_score_fall_back_to_cosine(self):
+        hits = [{**make_hit(rag.MIN_SCORE + 0.05), "ranks": {"vector": 1, "bm25": None, "rerank": None}}]
+        out = rag.answer("HDF?", retriever=StubStore(hits), generator=FakeGenerator("Cevap [1]."))
+        assert out["answer"] == "Cevap [1]."
 
     def test_uses_process_wide_retriever_and_generator_by_default(self):
         # autouse fixture: real knowledge/ docs + FakeGenerator; hash-embedder scores are

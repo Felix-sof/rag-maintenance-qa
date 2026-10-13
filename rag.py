@@ -6,13 +6,16 @@ The RAG pipeline: question -> retrieve -> augment -> generate -> cited answer.
                     LLM first rewrites it as a standalone question.
     2. Retrieve   - top-k chunks via hybrid search (vectors + BM25, fused,
                     re-ranked by a cross-encoder - see retriever.py).
-    3. Gate       - if even the best chunk scores below MIN_SCORE, the
-                    question is off-topic: answer "not in the knowledge base"
-                    without calling the LLM at all.
+    3. Gate       - if even the best chunk is a weak match (reranker score, or
+                    cosine in the modes without a reranker), the question is
+                    off-topic: answer "not in the knowledge base" without
+                    calling the LLM at all.
     4. Augment    - number the retrieved chunks [1]..[k] into a context block.
     5. Generate   - Gemini answers ONLY from that context, citing [n].
     6. Verify     - parse which [n] the answer actually cites, so callers can
-                    show the sources that were used, not just the retrieved ones.
+                    show the sources that were used, not just the retrieved ones,
+                    and check that every number in the answer is in one of them
+                    (grounding.py).
 
     python rag.py "HDF arızası nasıl önlenir?"
 """
@@ -21,22 +24,33 @@ import re
 import sys
 
 from generator import GenerationError, get_generator
+from grounding import unsupported_numbers
 from retriever import get_retriever
 
 DEFAULT_TOP_K = 4
 MAX_HISTORY_TURNS = 4
 
-# Cosine-similarity floor for the best retrieved chunk (always the embedding
-# cosine, whichever retrieval mode ranked the chunks). multilingual-e5 scores
-# are compressed into a narrow band, so this only catches clearly off-topic
-# questions. Measured with intfloat/multilingual-e5-small on this knowledge
-# base: in-scope questions scored 0.838-0.896, clearly unrelated ones
-# ("pizza tarifi", "Türkiye'nin başkenti", "Python'da liste") 0.738-0.799.
-# Near-domain questions the docs don't cover ("hidrolik pres yağ değişimi",
-# 0.832) overlap with in-scope ones and can't be separated by a threshold -
-# those are caught by the prompt rule below instead. Re-measure if you
-# change the embedding model or the documents substantially.
+# The off-topic gate: below these floors the best retrieved chunk is taken as
+# unrelated, and the question is refused without an LLM call. Both floors were
+# measured on this knowledge base with `python -m evals.gate_eval`; re-measure
+# if you change a model or the documents substantially.
+#
+# MIN_RERANK_SCORE applies when a cross-encoder scored the hits (the default
+# hybrid_rerank mode). It is a raw logit of mmarco-mMiniLMv2: in-scope
+# questions scored -4.58 or higher, and -5.0 refuses none of them while
+# stopping about two thirds of unrelated questions and a third of near-domain
+# ones the documents don't cover ("bu ay kaç arıza oldu").
+#
+# MIN_SCORE is the embedding cosine, used in the modes without a reranker.
+# multilingual-e5 compresses every score into a narrow band, so it is the
+# weaker signal: it stops more unrelated questions, but it also refuses
+# in-scope ones phrased unlike the documents ("Rulmandan ses geliyor" 0.764,
+# English questions around 0.79).
+#
+# Neither floor separates near-domain gaps from in-scope questions - the rest
+# of those are caught by the prompt rule below.
 MIN_SCORE = 0.80
+MIN_RERANK_SCORE = -5.0
 
 NO_ANSWER = "Bilgi bankasında bu sorunun cevabı yok."
 CONFLICT_MARKER = "⚠️ Çelişki:"
@@ -78,15 +92,17 @@ Conversation:
 Follow-up question: {question}"""
 
 
+def format_passage(hit: dict) -> str:
+    """One passage as the model sees it: a header (source, section, type, priority, date), then the text."""
+    tags = ["örnek belge"] if hit["doc_type"] == "example" else []
+    tags.append(f"öncelik {hit.get('priority', 1)}")
+    if hit.get("updated"):
+        tags.append(f"güncelleme {hit['updated']}")
+    return f"{hit['source']} > {hit['section']} ({', '.join(tags)})\n{hit['text']}"
+
+
 def format_context(hits: list[dict]) -> str:
-    blocks = []
-    for n, hit in enumerate(hits, start=1):
-        tags = ["örnek belge"] if hit["doc_type"] == "example" else []
-        tags.append(f"öncelik {hit.get('priority', 1)}")
-        if hit.get("updated"):
-            tags.append(f"güncelleme {hit['updated']}")
-        blocks.append(f"[{n}] {hit['source']} > {hit['section']} ({', '.join(tags)})\n{hit['text']}")
-    return "\n\n".join(blocks)
+    return "\n\n".join(f"[{n}] {format_passage(hit)}" for n, hit in enumerate(hits, start=1))
 
 
 def extract_citations(answer: str, n_sources: int) -> list[int]:
@@ -97,6 +113,16 @@ def extract_citations(answer: str, n_sources: int) -> list[int]:
             if 1 <= int(num) <= n_sources:
                 cited.add(int(num))
     return sorted(cited)
+
+
+def is_off_topic(hits: list[dict]) -> bool:
+    """True if even the best hit is too weak a match to be worth an LLM call."""
+    if not hits:
+        return True
+    rerank_scores = [h["ranks"]["rerank"] for h in hits if (h.get("ranks") or {}).get("rerank") is not None]
+    if rerank_scores:
+        return max(rerank_scores) < MIN_RERANK_SCORE
+    return max(h["score"] for h in hits) < MIN_SCORE
 
 
 def condense_question(question: str, history: list[dict], generator) -> str:
@@ -119,8 +145,9 @@ def answer(question: str, history: list[dict] = None, top_k: int = DEFAULT_TOP_K
     Returns a dict with "answer", "sources" (every retrieved chunk, numbered
     as in the prompt), "cited" (the source numbers the answer actually
     uses), "search_query" (the question after condensing), "conflict" (True
-    if the answer reports that its sources disagree), and "error" (True
-    only if the LLM call failed).
+    if the answer reports that its sources disagree), "unsupported_numbers"
+    (numbers in the answer that none of its cited sources contain - see
+    grounding.py), and "error" (True only if the LLM call failed).
     """
     retriever = retriever or get_retriever()
     generator = generator or get_generator()
@@ -131,6 +158,7 @@ def answer(question: str, history: list[dict] = None, top_k: int = DEFAULT_TOP_K
         "sources": [],
         "cited": [],
         "conflict": False,
+        "unsupported_numbers": [],
         "error": False,
     }
 
@@ -140,7 +168,7 @@ def answer(question: str, history: list[dict] = None, top_k: int = DEFAULT_TOP_K
 
         hits = retriever.search(search_query, top_k=top_k)
         result["sources"] = [{"n": n, **hit} for n, hit in enumerate(hits, start=1)]
-        if not hits or max(h["score"] for h in hits) < MIN_SCORE:
+        if is_off_topic(hits):
             result["answer"] = NO_ANSWER
             return result
 
@@ -153,6 +181,11 @@ def answer(question: str, history: list[dict] = None, top_k: int = DEFAULT_TOP_K
 
     result["cited"] = extract_citations(result["answer"], len(hits))
     result["conflict"] = CONFLICT_MARKER in result["answer"]
+    result["unsupported_numbers"] = unsupported_numbers(
+        result["answer"],
+        [format_passage(hits[n - 1]) for n in result["cited"]],
+        question=f"{question} {search_query}",
+    )
     return result
 
 
@@ -163,6 +196,8 @@ if __name__ == "__main__":
         sys.exit(0)
     out = answer(query)
     print(out["answer"], "\n")
+    if out["unsupported_numbers"]:
+        print(f" ! atıf yapılan kaynaklarda bulunmayan değerler: {', '.join(out['unsupported_numbers'])}\n")
     for src in out["sources"]:
         mark = "*" if src["n"] in out["cited"] else " "
         print(f" {mark}[{src['n']}] {src['score']:.3f}  {src['source']} > {src['section']}")

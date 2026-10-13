@@ -55,6 +55,13 @@ def test_expected_conflict_must_be_flagged():
     assert grade(case, {**_out("⚠️ Çelişki: 1380 [1], 1500 [2].", [1, 2]), "conflict": True})[0] == "pass"
 
 
+def test_number_missing_from_the_cited_sources_fails():
+    out = {**_out("Fark 8,6 K, hız 1500 rpm altında [1].", [1]), "unsupported_numbers": ["1500"]}
+    status, notes = grade(CASE, out)
+    assert status == "fail"
+    assert "1500" in notes[0]
+
+
 def test_false_conflict_alarm_fails():
     out = {**_out("⚠️ Çelişki: 8.6 K [1].", [1]), "conflict": True}
     status, notes = grade(CASE, out)
