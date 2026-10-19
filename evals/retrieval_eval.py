@@ -10,6 +10,12 @@ the section that actually answers it among the top-k results?
     python -m evals.retrieval_eval --mode hybrid    # one mode, with per-question detail
     python -m evals.retrieval_eval --min-mrr 0.9    # CI gate: exit 1 if the default mode
                                                     # (RETRIEVAL_MODE) scores below this on any set
+    python -m evals.retrieval_eval --compare-backends   # ChromaDB vs pgvector, and the three
+                                                        # keyword backends (needs DATABASE_URL)
+
+The default store and keyword backend come from VECTOR_BACKEND and
+KEYWORD_BACKEND, so `VECTOR_BACKEND=pgvector python -m evals.retrieval_eval
+--min-mrr 0.9` gates the pgvector backend.
 
 Two question sets:
     EASY  phrased close to the documents' own wording (written alongside them)
@@ -26,7 +32,7 @@ match on "<source> > <section>".
 
 import sys
 
-from retriever import MODES, RETRIEVAL_MODE, Retriever
+from retriever import KEYWORD_BACKENDS, MODES, RETRIEVAL_MODE, Retriever
 
 # (question, [expected "source > section" substrings])
 # EASY: phrased close to the documents' own wording.
@@ -124,6 +130,28 @@ def compare(k: int = 4) -> dict:
     return results
 
 
+def compare_backends(k: int = 4) -> list[tuple[str, str, str, dict]]:
+    """Every (vector store, keyword backend, mode) worth comparing. Needs DATABASE_URL.
+
+    Both stores index the same documents with the same embedding model, so
+    any difference between them comes from the store, not from the inputs.
+    """
+    from vector_store import make_store
+
+    chroma = make_store("chroma")
+    pgvector = make_store("pgvector", embedder=chroma.embedder)
+    combinations = [("chroma", "bm25", mode) for mode in MODES]
+    combinations.append(("pgvector", "bm25", "vector"))
+    for keyword in KEYWORD_BACKENDS:
+        combinations += [("pgvector", keyword, mode) for mode in ("bm25", "hybrid", "hybrid_rerank")]
+
+    rows = []
+    for backend, keyword, mode in combinations:
+        retriever = Retriever(store=chroma if backend == "chroma" else pgvector, mode=mode, keyword=keyword)
+        rows.append((backend, keyword, mode, {name: evaluate(retriever, cases, k) for name, cases in SETS.items()}))
+    return rows
+
+
 if __name__ == "__main__":
     k = int(sys.argv[sys.argv.index("--k") + 1]) if "--k" in sys.argv else 4
 
@@ -138,6 +166,18 @@ if __name__ == "__main__":
                 if row["rank"] != 1:
                     print(f"       top: {row['top']}")
             print(f"hit@1 {report['hit@1']:.0%}   hit@{k} {report[f'hit@{k}']:.0%}   MRR {report['mrr']:.3f}")
+        sys.exit(0)
+
+    if "--compare-backends" in sys.argv:
+        print(f"\n{'store':9s} {'keyword':15s} {'mode':14s} | {'easy hit@1':>10s} {'MRR':>6s} | {'hard hit@1':>10s} {'MRR':>6s}")
+        print("-" * 75)
+        for backend, keyword, mode, by_set in compare_backends(k):
+            keyword = "-" if mode == "vector" else keyword
+            easy, hard = by_set["easy"], by_set["hard"]
+            print(
+                f"{backend:9s} {keyword:15s} {mode:14s} | {easy['hit@1']:10.0%} {easy['mrr']:6.3f}"
+                f" | {hard['hit@1']:10.0%} {hard['mrr']:6.3f}"
+            )
         sys.exit(0)
 
     results = compare(k)

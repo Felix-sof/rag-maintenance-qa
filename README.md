@@ -30,6 +30,9 @@ locally on CPU; generation uses the Google Gemini free tier.
 - **Hybrid retrieval**: dense vectors and BM25, fused with Reciprocal Rank Fusion
   and re-ranked by a multilingual cross-encoder. On a hard query set, MRR goes
   from **0.786 (vectors only) to 0.942**.
+- **ChromaDB or PostgreSQL + pgvector**: the index runs locally in ChromaDB or in
+  Postgres (HNSW vector index, full-text search, SQL migrations), with
+  identical retrieval scores on both.
 - **Grounded answers**: every claim is cited as `[n]`. Off-topic questions are
   refused by a score gate before any LLM call, and near-domain gaps are refused
   by the prompt.
@@ -45,7 +48,7 @@ locally on CPU; generation uses the Google Gemini free tier.
   question before retrieval.
 - **Measured, not assumed**: a retrieval eval and an off-topic gate eval, both
   with a CI quality gate, an end-to-end answer eval against the live LLM, and
-  107 offline unit tests.
+  121 unit tests.
 
 ## Architecture
 
@@ -71,8 +74,10 @@ locally on CPU; generation uses the Google Gemini free tier.
 |---|---|
 | `chunking.py` | Markdown is split on headings, with the heading path prepended to each chunk. PDFs are split by page. Metadata comes from a `.meta.json` sidecar, then front matter, then defaults. An unreadable file is skipped and reported; it never breaks the index. |
 | `embeddings.py` | [`intfloat/multilingual-e5-small`](https://huggingface.co/intfloat/multilingual-e5-small) with E5's `query:`/`passage:` prefixes. |
-| `vector_store.py` | Persistent ChromaDB index, fingerprinted on documents + model + chunk size and rebuilt automatically. Handles upload and delete, with path-traversal-safe names and deletion limited to `uploads/`. |
-| `retriever.py` | Hybrid search: BM25 with Turkish-aware lowercasing and first-5-character stemming, RRF fusion, and a cross-encoder rerank of the shortlist. |
+| `vector_store.py` | The index, fingerprinted on documents + model + chunk size and rebuilt automatically. ChromaDB by default (`VECTOR_BACKEND=chroma`). Handles upload and delete, with path-traversal-safe names and deletion limited to `uploads/`. |
+| `pg_store.py` | The same index in PostgreSQL + pgvector (`VECTOR_BACKEND=pgvector`): HNSW vector search, Postgres full-text search, transactional rebuilds. |
+| `db/` | Plain-SQL migrations and their runner, and a local Postgres for development without Docker. |
+| `retriever.py` | Hybrid search: BM25 (or Postgres full-text search) with Turkish-aware lowercasing and first-5-character stemming, RRF fusion, and a cross-encoder rerank of the shortlist. |
 | `rag.py` | The pipeline: condense → retrieve → gate → generate → verify citations, conflicts and numbers. |
 | `grounding.py` | The number check: compares every number in the answer, by value (`8,6` = `8.6`, `13.000` = `13,000`), with the passages it cites. |
 | `generator.py` | Gemini client. Retries 429/5xx and dropped TLS connections on fresh clients, and fails fast when the daily quota is exhausted. |
@@ -112,6 +117,68 @@ BM25 on Turkish needs care. The language is agglutinative ("arıza", "arızası"
 "arızaların"), so tokens are truncated to their first 5 characters, a simple
 stemmer that has been studied for Turkish IR (Can et al., 2008). Lowercasing
 also has to follow Turkish rules (`I` → `ı`, `İ` → `i`).
+
+### ChromaDB or PostgreSQL + pgvector
+
+The index can live in a local ChromaDB folder (the default, no server needed)
+or in PostgreSQL with the pgvector extension. Postgres is what a deployment
+needs: the index survives a container restart, several processes can share
+it, and a rebuild replaces it in one transaction.
+
+The schema (`db/migrations/001_pgvector_index.sql`) has three tables:
+
+- `documents`: title, type, priority, date, plus the raw front matter as `jsonb`;
+- `chunks`: the text, a `vector(384)` embedding with an HNSW index on cosine
+  distance, and two `tsvector` columns with GIN indexes;
+- `index_state`: the fingerprint the rows were built from.
+
+At 31 chunks the HNSW index changes nothing measurable, since a full scan is
+just as fast. It is there because the same query has to stay fast at much
+larger sizes.
+
+**Keyword search: keep BM25 or use Postgres full-text search?** Postgres can
+do the keyword half of hybrid search itself, so it needn't load the corpus into
+the app's memory. Two ways were measured against the in-memory BM25:
+
+- `pg_fts_turkish`: Postgres's built-in Snowball stemmer for Turkish;
+- `pg_fts_stems`: the BM25 retriever's own 5-character stems, matched by Postgres.
+
+| Store | Keyword search | Mode | easy MRR | hard MRR |
+|---|---|---|---|---|
+| ChromaDB | BM25 (in memory) | vector only | 0.975 | 0.786 |
+| pgvector | BM25 (in memory) | vector only | 0.975 | 0.786 |
+| pgvector | BM25 (in memory) | keyword only | 0.825 | 0.697 |
+| pgvector | `pg_fts_turkish` | keyword only | 0.908 | 0.683 |
+| pgvector | `pg_fts_stems` | keyword only | 0.858 | 0.750 |
+| pgvector | BM25 (in memory) | hybrid | 0.975 | 0.822 |
+| pgvector | `pg_fts_turkish` | hybrid | 0.950 | 0.761 |
+| pgvector | `pg_fts_stems` | hybrid | 1.000 | 0.767 |
+| **either** | **any of the three** | **hybrid + rerank** | **0.975** | **0.942** |
+
+- pgvector returns the same neighbours as ChromaDB, so every number is
+  identical between the two stores.
+- On their own, both full-text variants beat BM25 on the easy set. Fused with
+  the vectors, BM25 is ahead on the hard set (0.822 against about 0.76).
+  Postgres's `ts_rank` has no inverse document frequency: "arıza", which is in
+  22 of the 31 chunks, weighs as much as "OSF".
+- After the reranker all three end at the same MRR, so the choice doesn't change
+  the default pipeline's answers. BM25 stays the default. `pg_fts_stems` is the
+  one to switch to when the corpus no longer fits in memory.
+- `ts_rank`'s length normalisation (flag 1) made both full-text variants
+  slightly worse, so it is off.
+- With 20 and 30 questions, one question moves hit@1 by 5 and 3.3 points.
+  Differences of one or two questions are noise.
+
+Two Turkish details matter in Postgres:
+
+- **Lowercasing:** Postgres lowercases with the database's locale. Under the C
+  locale `lower('ISI İŞLEM')` returns `isi İŞlem`, and the Turkish stemmer then
+  indexes "ISI" as `is`. Text is therefore lowercased in Python
+  (`turkish_lower`) before it reaches Postgres. `tests/test_pg_store.py` checks
+  that a document's "ISI" is found by the query "ısı".
+- **Matching:** Query terms are OR-ed (`a | b | c`) as in BM25. Postgres's
+  `plainto_tsquery` would require every word of the question to be in the
+  passage.
 
 ### Why two layers of refusal
 
@@ -275,6 +342,21 @@ curl -X POST http://localhost:8000/ask -H "Content-Type: application/json" \
   contain (empty when everything checks out)
 - `search_query`: the condensed question
 
+### PostgreSQL + pgvector
+
+```bash
+pip install pgserver                        # Postgres 16 + pgvector, no Docker needed
+python -m db.local_postgres                 # starts it, prints DATABASE_URL for .env
+# in .env: VECTOR_BACKEND=pgvector and DATABASE_URL=...
+python vector_store.py --rebuild            # migrates the schema, indexes knowledge/
+python -m evals.retrieval_eval --compare-backends
+```
+
+Any Postgres with the `vector` extension works, e.g. a free Neon database
+(`DATABASE_URL=postgresql://...?sslmode=require`), or
+`docker compose --profile pgvector up`. Migrations run automatically on the
+first connection, or explicitly with `python -m db.migrate`.
+
 ### Configuration (`.env`)
 
 | Variable | Default | |
@@ -284,26 +366,32 @@ curl -X POST http://localhost:8000/ask -H "Content-Type: application/json" \
 | `RETRIEVAL_MODE` | `hybrid_rerank` | `vector`, `bm25`, `hybrid` or `hybrid_rerank` |
 | `EMBED_MODEL` | `intfloat/multilingual-e5-small` | Changing it rebuilds the index automatically. Re-measure `MIN_SCORE` afterwards. |
 | `RERANK_MODEL` | `cross-encoder/mmarco-mMiniLMv2-L12-H384-v1` | `MIN_RERANK_SCORE` is on this model's score scale. Re-measure it with `python -m evals.gate_eval` if you change the model. |
+| `VECTOR_BACKEND` | `chroma` | `chroma` or `pgvector` |
+| `DATABASE_URL` | | Postgres connection string, for `pgvector` |
+| `KEYWORD_BACKEND` | `bm25` | `bm25`, or with `pgvector` also `pg_fts_stems` / `pg_fts_turkish` |
 
 ## Testing and evaluation
 
 ```bash
 pip install -r requirements-dev.txt
-pytest                                       # 107 tests, ~15 s, offline
+pytest                                       # 121 tests, ~20 s, offline (14 need TEST_DATABASE_URL)
 python -m evals.retrieval_eval               # retriever comparison (offline, free)
 python -m evals.retrieval_eval --mode hybrid_rerank   # per-question detail
 python -m evals.gate_eval                    # off-topic gate comparison (offline, free)
+python -m evals.retrieval_eval --compare-backends   # ChromaDB vs pgvector (needs DATABASE_URL)
 python -m evals.answer_eval                  # end to end, against the live Gemini API
 ```
 
 - **Unit tests** use a deterministic hashing embedder, a fake LLM and PDFs
-  generated in code, so they need no network, model download or API key. They
-  cover:
+  generated in code, so they need no network, model download or API key. The
+  pgvector tests also need a Postgres (`TEST_DATABASE_URL`). They cover:
   - chunking (Markdown, PDF, sidecars, unreadable files),
   - the index (rebuild, persistence, uploads),
   - hybrid retrieval and fusion,
   - the pipeline (gate, condensing, citations, conflicts),
   - the number check,
+  - the pgvector backend: migrations, rebuilds, vector and full-text search,
+    Turkish lowercasing,
   - the Gemini retry and quota policy,
   - the API and the eval grader.
 - **Retrieval eval**: the table above. CI fails if the default mode's MRR drops
@@ -334,8 +422,9 @@ right section was never retrieved, or the model didn't use it.
 
 **CI** (`.github/workflows/ci.yml`) runs three jobs:
 
-1. the unit tests,
+1. the unit tests, with a pgvector service container for the Postgres tests,
 2. the retrieval quality gate and the off-topic gate check with the real models,
+   on both ChromaDB and pgvector,
 3. a Docker build plus a smoke test that indexes the knowledge base and runs a
    hybrid search inside the container.
 
@@ -355,14 +444,16 @@ right section was never retrieved, or the model didn't use it.
 ├── knowledge/              documents (uploads/ is git-ignored)
 ├── chunking.py             load + split Markdown / text / PDF
 ├── embeddings.py           local multilingual embeddings
-├── vector_store.py         ChromaDB index, auto-rebuild, uploads
+├── vector_store.py         the index (ChromaDB), auto-rebuild, uploads
+├── pg_store.py             the index in PostgreSQL + pgvector
+├── db/                     SQL migrations, migration runner, local Postgres
 ├── retriever.py            BM25 + vectors + RRF + cross-encoder
 ├── rag.py                  the RAG pipeline
 ├── grounding.py            number check on the answer
 ├── generator.py            Gemini client with retries
 ├── app.py · api.py         Streamlit UI · FastAPI
 ├── evals/                  retrieval_eval.py, gate_eval.py, answer_eval.py, results/
-├── tests/                  107 offline tests
+├── tests/                  121 tests
 ├── Dockerfile · docker-compose.yml
 └── .github/workflows/ci.yml
 ```

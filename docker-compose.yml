@@ -27,6 +27,21 @@ services:
       - ./knowledge:/app/knowledge
       - api-index:/app/data
 
+  # Optional Postgres + pgvector: docker compose --profile pgvector up, with
+  #   VECTOR_BACKEND=pgvector
+  #   DATABASE_URL=postgresql://postgres:postgres@postgres:5432/postgres
+  # in .env. Unlike a ChromaDB index, one Postgres index can be shared by both
+  # services: rebuilds are transactional and serialised by an advisory lock.
+  postgres:
+    image: pgvector/pgvector:pg17
+    profiles: [pgvector]
+    environment:
+      POSTGRES_PASSWORD: postgres  # local only
+    ports: ["5432:5432"]
+    volumes:
+      - pg-data:/var/lib/postgresql/data
+
 volumes:
   ui-index:
   api-index:
+  pg-data:

@@ -7,8 +7,18 @@ on:
 
 jobs:
   tests:
-    name: Unit tests (offline)
+    name: Unit tests (offline, plus a local Postgres for the pgvector backend)
     runs-on: ubuntu-latest
+    services:
+      postgres:  # throwaway database for this job; the password is not a secret
+        image: pgvector/pgvector:pg17
+        env:
+          POSTGRES_PASSWORD: postgres
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres" --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      TEST_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/postgres
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -25,6 +35,16 @@ jobs:
   retrieval-quality:
     name: Retrieval quality gate (real models, no LLM)
     runs-on: ubuntu-latest
+    services:
+      postgres:  # throwaway database for this job; the password is not a secret
+        image: pgvector/pgvector:pg17
+        env:
+          POSTGRES_PASSWORD: postgres
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres" --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      DATABASE_URL: postgresql://postgres:postgres@localhost:5432/postgres
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -44,6 +64,14 @@ jobs:
         run: python -m evals.retrieval_eval --min-mrr 0.90
       - name: Compare off-topic gates and fail if an in-scope question is refused
         run: python -m evals.gate_eval --check
+      - name: Same two gates with the pgvector backend
+        env:
+          VECTOR_BACKEND: pgvector
+        run: |
+          python -m evals.retrieval_eval --min-mrr 0.90
+          python -m evals.gate_eval --check
+      - name: ChromaDB vs pgvector and the keyword backends (report only)
+        run: python -m evals.retrieval_eval --compare-backends
 
   docker:
     name: Docker image builds and answers a search

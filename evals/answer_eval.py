@@ -217,7 +217,7 @@ def retriever_with_extra_docs(extra_docs: dict, workdir: Path) -> Retriever:
         (docs / name).write_text(content, encoding="utf-8")
     store = VectorStore(docs_dir=docs, index_dir=workdir / "index", embedder=get_store().embedder)
     default = get_retriever()
-    return Retriever(store=store, mode=default.mode, reranker=default.reranker)
+    return Retriever(store=store, mode=default.mode, reranker=default.reranker, keyword="bm25")  # a Chroma store
 
 
 def run_case(case: dict) -> dict:

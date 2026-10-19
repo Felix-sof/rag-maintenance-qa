@@ -17,12 +17,14 @@ import pytest
 
 class HashEmbedder:
     name = "test-hash-embedder"
-    DIM = 256
+
+    def __init__(self, dim=256):
+        self.dim = dim  # the pgvector tests use 384, the size of chunks.embedding
 
     def _vec(self, text):
-        v = [0.0] * self.DIM
+        v = [0.0] * self.dim
         for token in re.findall(r"\w+", text.lower()):
-            v[int(hashlib.md5(token.encode()).hexdigest(), 16) % self.DIM] += 1.0
+            v[int(hashlib.md5(token.encode()).hexdigest(), 16) % self.dim] += 1.0
         norm = math.sqrt(sum(x * x for x in v)) or 1.0
         return [x / norm for x in v]
 
