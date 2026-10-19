@@ -192,6 +192,14 @@ def read_sidecar(path: Path) -> dict:
         return {}
 
 
+def document_metadata(path: Path) -> dict:
+    """A document's metadata exactly as written: front matter overlaid by the sidecar, before defaults."""
+    front_matter = {}
+    if path.suffix.lower() != ".pdf":
+        front_matter, _ = parse_front_matter(path.read_text(encoding="utf-8"))
+    return {**front_matter, **read_sidecar(path)}
+
+
 def document_paths(docs_dir: Path) -> list[Path]:
     """Every supported document under docs_dir, including subfolders (e.g. uploads/)."""
     return sorted(p for p in Path(docs_dir).rglob("*") if p.is_file() and p.suffix.lower() in SUPPORTED_EXTENSIONS)

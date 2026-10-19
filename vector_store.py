@@ -1,7 +1,11 @@
 """
-Persistent vector index over the knowledge base (ChromaDB, cosine distance).
+Persistent vector index over the knowledge base.
 
-The index stores a fingerprint of everything it depends on - the documents'
+Two backends, chosen with VECTOR_BACKEND:
+    chroma    (default) a local ChromaDB index in data/chroma - no server needed
+    pgvector  PostgreSQL + pgvector at DATABASE_URL (pg_store.py)
+
+Both store a fingerprint of everything the index depends on - the documents'
 contents, the embedding model, and the chunk size. If any of them change,
 the next build()/search() rebuilds the index automatically, so editing a
 document never leaves stale vectors behind.
@@ -12,30 +16,37 @@ document never leaves stale vectors behind.
 
 import hashlib
 import json
+import os
 import re
 import sys
 from pathlib import Path
 
+from dotenv import load_dotenv
+
 from chunking import MAX_CHUNK_CHARS, META_SUFFIX, SUPPORTED_EXTENSIONS, document_paths, load_chunks, source_name
 from embeddings import E5Embedder, Embedder
+
+load_dotenv()
 
 DOCS_DIR = Path(__file__).parent / "knowledge"
 INDEX_DIR = Path(__file__).parent / "data" / "chroma"
 COLLECTION_NAME = "knowledge_base"
 MAX_TOP_K = 10
 UPLOADS_SUBDIR = "uploads"  # documents added from the UI live here and can be deleted from it
+VECTOR_BACKEND = os.environ.get("VECTOR_BACKEND", "chroma")
+BACKENDS = ("chroma", "pgvector")
 
 
-class VectorStore:
-    def __init__(self, docs_dir: Path = DOCS_DIR, index_dir: Path = INDEX_DIR, embedder: Embedder = None):
-        import chromadb
-        from chromadb.config import Settings
+class KnowledgeBase:
+    """What both backends share: the documents on disk, their fingerprint, uploads.
 
+    A backend implements build(), skipped(), stats(), index_fingerprint(),
+    all_chunks(), get_chunks() and search_by_vector().
+    """
+
+    def __init__(self, docs_dir: Path = DOCS_DIR, embedder: Embedder = None):
         self.docs_dir = Path(docs_dir)
         self.embedder = embedder or E5Embedder()
-        Path(index_dir).mkdir(parents=True, exist_ok=True)
-        self._client = chromadb.PersistentClient(path=str(index_dir), settings=Settings(anonymized_telemetry=False))
-        self._collection = None
 
     def fingerprint(self) -> str:
         h = hashlib.sha256(f"{self.embedder.name}|{MAX_CHUNK_CHARS}".encode("utf-8"))
@@ -80,6 +91,23 @@ class VectorStore:
         for chunk in self.all_chunks():
             counts[chunk["source"]] = counts.get(chunk["source"], 0) + 1
         return counts
+
+    def search(self, query: str, top_k: int = 4) -> list[dict]:
+        """Return the top_k most similar chunks, best first, with cosine similarity as `score`."""
+        return self.search_by_vector(self.embedder.embed_query(query), top_k)
+
+
+class VectorStore(KnowledgeBase):
+    """The ChromaDB backend."""
+
+    def __init__(self, docs_dir: Path = DOCS_DIR, index_dir: Path = INDEX_DIR, embedder: Embedder = None):
+        import chromadb
+        from chromadb.config import Settings
+
+        super().__init__(docs_dir, embedder)
+        Path(index_dir).mkdir(parents=True, exist_ok=True)
+        self._client = chromadb.PersistentClient(path=str(index_dir), settings=Settings(anonymized_telemetry=False))
+        self._collection = None
 
     def build(self, force: bool = False) -> dict:
         """(Re)build the index if the documents/model changed since the last build, or if forced."""
@@ -145,20 +173,26 @@ class VectorStore:
         """Fingerprint of the index currently loaded (changes whenever it is rebuilt)."""
         return (self._get_collection().metadata or {}).get("fingerprint", "")
 
-    def all_chunks(self) -> list[dict]:
-        """Every indexed chunk with its stored embedding (used to build the keyword index)."""
-        collection = self._get_collection()
-        if collection.count() == 0:
-            return []
-        res = collection.get(include=["documents", "metadatas", "embeddings"])
+    @staticmethod
+    def _rows(res: dict) -> list[dict]:
         return [
             {"id": id_, "text": doc, "embedding": list(emb), **meta}
             for id_, doc, meta, emb in zip(res["ids"], res["documents"], res["metadatas"], res["embeddings"])
         ]
 
-    def search(self, query: str, top_k: int = 4) -> list[dict]:
-        """Return the top_k most similar chunks, best first, with cosine similarity as `score`."""
-        return self.search_by_vector(self.embedder.embed_query(query), top_k)
+    def all_chunks(self) -> list[dict]:
+        """Every indexed chunk with its stored embedding (used to build the keyword index)."""
+        collection = self._get_collection()
+        if collection.count() == 0:
+            return []
+        return self._rows(collection.get(include=["documents", "metadatas", "embeddings"]))
+
+    def get_chunks(self, ids: list[str]) -> dict[str, dict]:
+        """The chunks with these ids, with their stored embeddings, keyed by id."""
+        if not ids:
+            return {}
+        res = self._get_collection().get(ids=list(ids), include=["documents", "metadatas", "embeddings"])
+        return {row["id"]: row for row in self._rows(res)}
 
     def search_by_vector(self, query_vector: list[float], top_k: int = 4, max_k: int = MAX_TOP_K) -> list[dict]:
         collection = self._get_collection()
@@ -185,14 +219,24 @@ class VectorStore:
         ]
 
 
-_store: VectorStore = None
+def make_store(backend: str = VECTOR_BACKEND, **kwargs) -> KnowledgeBase:
+    if backend == "chroma":
+        return VectorStore(**kwargs)
+    if backend == "pgvector":
+        from pg_store import PgVectorStore
+
+        return PgVectorStore(**kwargs)
+    raise ValueError(f"unknown VECTOR_BACKEND {backend!r}; expected one of {BACKENDS}")
 
 
-def get_store() -> VectorStore:
+_store: KnowledgeBase = None
+
+
+def get_store() -> KnowledgeBase:
     """Process-wide store, created lazily (tests replace it via vector_store._store)."""
     global _store
     if _store is None:
-        _store = VectorStore()
+        _store = make_store()
     return _store
 
 
