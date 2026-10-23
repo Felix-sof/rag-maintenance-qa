@@ -3,10 +3,10 @@ Rate limits for /ask, the endpoint that costs something (a Gemini call).
 
 Two limits, because they guard against different things:
 
-    per client  RATE_LIMIT_PER_MINUTE requests in any 60 s, so one caller can't
-                take the whole quota by themselves
-    global      ASK_LIMIT_PER_DAY requests in any 24 h, whoever is calling. A
-                per-client limit alone is beaten by switching IP addresses;
+    per client  RATE_LIMIT_PER_MINUTE (5) requests in any 60 s, so one caller
+                can't take the whole quota by themselves
+    global      ASK_LIMIT_PER_DAY (20) requests in any 24 h, whoever is calling.
+                A per-client limit alone is beaten by switching IP addresses;
                 this one caps the spend, and keeps a public demo inside the
                 Gemini free tier's daily quota.
 
@@ -20,8 +20,8 @@ import threading
 import time
 from collections import defaultdict, deque
 
-PER_MINUTE = int(os.environ.get("RATE_LIMIT_PER_MINUTE", "10"))
-PER_DAY = int(os.environ.get("ASK_LIMIT_PER_DAY", "200"))
+PER_MINUTE = int(os.environ.get("RATE_LIMIT_PER_MINUTE", "5"))
+PER_DAY = int(os.environ.get("ASK_LIMIT_PER_DAY", "20"))
 
 
 class RateLimiter:

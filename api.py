@@ -18,10 +18,13 @@ For a public deployment:
                     deployment indexed (cloud disks don't keep uploaded files anyway)
     WARM_UP=1       load the models before accepting traffic, so the first user
                     doesn't wait for them (see lifespan below)
-    /ask is rate limited per client and per day (rate_limit.py).
+    /ask is rate limited per client and per day, and the daily cap is also
+    checked against the query log, so it survives a restart (rate_limit.py).
+    The other endpoints have a looser per-client limit; inputs are capped in size.
 """
 
 import os
+import time
 from contextlib import asynccontextmanager
 from datetime import date
 from typing import Literal, Optional
@@ -34,7 +37,7 @@ import query_log
 import rag
 import retriever
 from generator import MODEL
-from rate_limit import RateLimiter
+from rate_limit import PER_DAY, RateLimiter
 from vector_store import MAX_TOP_K, get_store
 
 
@@ -60,14 +63,46 @@ app = FastAPI(
     description="Question answering over a milling-machine maintenance knowledge base, with cited sources.",
     lifespan=lifespan,
 )
-limiter = RateLimiter()
+limiter = RateLimiter()  # /ask: it calls the LLM
+light_limiter = RateLimiter(per_minute=60, per_day=5_000)  # everything else costs CPU or a database query
+
+MAX_QUESTION_CHARS = 500  # longer input buys an attacker CPU time in the embedder and the reranker
+MAX_HISTORY_TURNS = 4  # rag.py only reads the last 4 anyway
+MAX_TURN_CHARS = 2_000
+
+
+def _client(request: Request) -> str:
+    return request.client.host if request.client else "unknown"
+
+
+def _too_many(wait: int) -> HTTPException:
+    return HTTPException(status_code=429, detail="too many requests", headers={"Retry-After": str(wait)})
 
 
 def rate_limited(request: Request) -> None:
-    """Dependency for the endpoints that call the LLM."""
-    allowed, wait = limiter.check(request.client.host if request.client else "unknown")
+    """Dependency for the endpoints that call the LLM.
+
+    The in-memory counters reset when the instance restarts - and with
+    min-instances=0 it restarts after every idle spell. So the daily cap is
+    also checked against the query log in Postgres, which a restart doesn't
+    clear. If the database can't be reached, the in-memory cap still holds.
+    """
+    allowed, wait = limiter.check(_client(request))
     if not allowed:
-        raise HTTPException(status_code=429, detail="too many requests", headers={"Retry-After": str(wait)})
+        raise _too_many(wait)
+    if query_log.enabled():
+        try:
+            used = query_log.get().llm_answers_last_24h(source="api")
+        except Exception:  # noqa: BLE001 - an unreachable database must not take /ask down with it
+            used = 0
+        if used >= PER_DAY:
+            raise _too_many(3600)
+
+
+def lightly_limited(request: Request) -> None:
+    allowed, wait = light_limiter.check(_client(request))
+    if not allowed:
+        raise _too_many(wait)
 
 
 def writable() -> None:
@@ -76,33 +111,43 @@ def writable() -> None:
 
 
 class Turn(BaseModel):
-    question: str
-    answer: str
+    question: str = Field(..., max_length=MAX_TURN_CHARS)
+    answer: str = Field(..., max_length=MAX_TURN_CHARS)
 
 
 class AskRequest(BaseModel):
-    question: str = Field(..., min_length=1, examples=["HDF arızası hangi koşullarda oluşur?"])
-    history: list[Turn] = Field(default_factory=list, description="Previous turns, oldest first, for follow-ups.")
+    question: str = Field(..., min_length=1, max_length=MAX_QUESTION_CHARS, examples=["HDF arızası hangi koşullarda oluşur?"])
+    history: list[Turn] = Field(
+        default_factory=list, max_length=MAX_HISTORY_TURNS, description="Previous turns, oldest first, for follow-ups."
+    )
     top_k: int = Field(rag.DEFAULT_TOP_K, ge=1, le=MAX_TOP_K)
 
 
 _retrievers_by_mode: dict[str, retriever.Retriever] = {}
 
 
+_health_cache: dict = {"at": float("-inf"), "index": None}
+HEALTH_CACHE_S = 30
+
+
 @app.get("/health")
 def health() -> dict:
+    """Liveness and index stats. Not rate limited - the platform's probes call it - so the
+    database part is cached: a flood of /health requests can't become a flood of queries."""
+    if time.monotonic() - _health_cache["at"] > HEALTH_CACHE_S:
+        _health_cache.update(at=time.monotonic(), index=get_store().stats())
     return {
         "status": "ok",
         "read_only": read_only(),
         "model": MODEL,
         "retrieval_mode": retriever.get_retriever().mode,
-        "index": get_store().stats(),
+        "index": _health_cache["index"],
     }
 
 
-@app.get("/search")
+@app.get("/search", dependencies=[Depends(lightly_limited)])
 def search(
-    q: str = Query(..., min_length=1),
+    q: str = Query(..., min_length=1, max_length=MAX_QUESTION_CHARS),
     top_k: int = Query(rag.DEFAULT_TOP_K, ge=1, le=MAX_TOP_K),
     mode: Optional[Literal["vector", "bm25", "hybrid", "hybrid_rerank"]] = None,
 ) -> dict:
@@ -125,7 +170,7 @@ def ask(req: AskRequest) -> dict:
 STATS_QUERIES = ("daily_volume", "refusal_rate", "latency_percentiles", "top_documents")
 
 
-@app.get("/stats")
+@app.get("/stats", dependencies=[Depends(lightly_limited)])
 def stats() -> dict:
     if not query_log.enabled():
         raise HTTPException(status_code=503, detail="query logging is off: set DATABASE_URL")
@@ -133,7 +178,7 @@ def stats() -> dict:
     return {name: analytics.run(log, name) for name in STATS_QUERIES}
 
 
-@app.get("/documents")
+@app.get("/documents", dependencies=[Depends(lightly_limited)])
 def list_documents() -> dict:
     store = get_store()
     return {"documents": store.chunk_counts(), "skipped": store.skipped()}

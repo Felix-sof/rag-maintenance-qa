@@ -74,6 +74,15 @@ def test_a_result_becomes_a_log_row_and_one_row_per_hit(log):
 
 
 @needs_postgres
+def test_llm_answers_in_the_last_day_count_toward_the_daily_cap(log):
+    log.record(result(), source="api")
+    log.record(result(outcome="refused_gate", llm_calls=0, cited=()), source="api")  # no LLM call: free
+    log.record(result(), source="ui")  # another source
+    backdate(log, log.record(result(), source="api"), days=2)  # older than 24 h
+    assert log.llm_answers_last_24h("api") == 1
+
+
+@needs_postgres
 def test_no_llm_call_means_no_token_or_llm_time(log):
     log_id = log.record(result(outcome="refused_gate", llm_calls=0, cited=()), source="ui")
     row = log.fetch(f"SELECT prompt_tokens, output_tokens, llm_ms, llm_calls FROM query_logs WHERE id = {log_id}")[0]

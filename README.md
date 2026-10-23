@@ -52,7 +52,7 @@ locally on CPU; generation uses the Google Gemini free tier.
   question before retrieval.
 - **Measured, not assumed**: a retrieval eval and an off-topic gate eval, both
   with a CI quality gate, an end-to-end answer eval against the live LLM, and
-  147 unit tests.
+  154 unit tests.
 
 ## Architecture
 
@@ -298,6 +298,32 @@ as `source = 'replay'`, which keeps them apart from real `api` and `ui`
 traffic in every query. It resumes where it stopped, and it stops by itself
 when the Gemini free tier's daily quota runs out.
 
+### A public endpoint on a zero budget
+
+The API is meant to run publicly on a free tier, where abuse costs money or takes
+the demo down. These are the layers of defence, from cheapest to hardest:
+
+- **Input limits.** A question is capped at 500 characters and the history at 4
+  turns of 2,000. Anything longer is rejected before it reaches the embedder or
+  the reranker.
+- **Per-client limits.** `/ask` allows 5 requests a minute per client. `/search`,
+  `/stats` and `/documents` allow 60. The limit is checked before the input, so
+  a stream of invalid requests is limited too.
+- **A global daily cap.** `/ask` allows 20 requests per 24 hours from everyone
+  together, because a per-client limit is beaten by switching IP addresses.
+  In-memory counters reset whenever a scale-to-zero instance restarts, so the
+  cap is also read from the query log in Postgres: no more than 20 questions a
+  day reach the LLM, restarts or not.
+- **No database work in `/health`.** The platform's probes call it without a
+  rate limit, so its index stats are cached for 30 s.
+- **Read-only.** Uploads and deletes are off, and a serving instance never
+  rebuilds the index.
+
+What the app can't do on its own: every request, even one answered with a 429,
+still reaches the container. The bounds on cost are the platform's: a single
+instance at most, a budget alert, and a Gemini key from a project without
+billing, whose free quota simply runs out instead of being charged.
+
 ### Conflicting sources
 
 Each document has a `priority` (default: `reference` 2, `example` 1) and an
@@ -433,14 +459,14 @@ first connection, or explicitly with `python -m db.migrate`.
 | `QUERY_LOG` | `on` | Questions are logged to `DATABASE_URL` when it is set; `off` turns that off. |
 | `READ_ONLY` | `0` | `1` in a public deployment: uploads and deletes are refused, and the pgvector index is served as built, never rebuilt by a serving instance. |
 | `WARM_UP` | `0` | `1` loads the models at startup, before the API accepts requests. |
-| `RATE_LIMIT_PER_MINUTE` | `10` | `/ask` requests per client per minute |
-| `ASK_LIMIT_PER_DAY` | `200` | `/ask` requests per 24 hours from everyone together; caps the Gemini spend |
+| `RATE_LIMIT_PER_MINUTE` | `5` | `/ask` requests per client per minute |
+| `ASK_LIMIT_PER_DAY` | `20` | `/ask` requests per 24 hours from everyone together, and LLM answers per 24 hours in the query log (which a restart doesn't reset); caps the Gemini spend |
 
 ## Testing and evaluation
 
 ```bash
 pip install -r requirements-dev.txt
-pytest                                       # 147 tests, ~20 s, offline (28 need TEST_DATABASE_URL)
+pytest                                       # 154 tests, ~20 s, offline (29 need TEST_DATABASE_URL)
 python -m evals.retrieval_eval               # retriever comparison (offline, free)
 python -m evals.retrieval_eval --mode hybrid_rerank   # per-question detail
 python -m evals.gate_eval                    # off-topic gate comparison (offline, free)
@@ -525,7 +551,7 @@ right section was never retrieved, or the model didn't use it.
 ├── analytics/              the analytics SQL, the report and the replay
 ├── pages/analytics.py      Streamlit analytics page
 ├── evals/                  retrieval_eval.py, gate_eval.py, answer_eval.py, results/
-├── tests/                  147 tests
+├── tests/                  154 tests
 ├── Dockerfile · docker-compose.yml   local images (UI + API)
 ├── deploy/Dockerfile       the cloud image (API only)
 └── .github/workflows/ci.yml
