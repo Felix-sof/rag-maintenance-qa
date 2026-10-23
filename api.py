@@ -10,6 +10,8 @@ GET    /documents           indexed documents with chunk counts, plus any that c
 POST   /documents           upload a PDF / Markdown / text document (multipart) and index it
 DELETE /documents/{source}  delete an uploaded document (uploads/ only) and re-index
 GET    /health              index stats
+GET    /stats               query-log analytics: daily volume, refusal rate, latency, top documents
+                            (needs DATABASE_URL; the SQL is in analytics/)
 """
 
 from datetime import date
@@ -18,6 +20,8 @@ from typing import Literal, Optional
 from fastapi import FastAPI, File, Form, HTTPException, Query, UploadFile
 from pydantic import BaseModel, Field
 
+import analytics
+import query_log
 import rag
 import retriever
 from generator import MODEL
@@ -70,7 +74,20 @@ def search(
 
 @app.post("/ask")
 def ask(req: AskRequest) -> dict:
-    return rag.answer(req.question, history=[t.model_dump() for t in req.history], top_k=req.top_k)
+    result = rag.answer(req.question, history=[t.model_dump() for t in req.history], top_k=req.top_k)
+    query_log.record(result, source="api")
+    return result
+
+
+STATS_QUERIES = ("daily_volume", "refusal_rate", "latency_percentiles", "top_documents")
+
+
+@app.get("/stats")
+def stats() -> dict:
+    if not query_log.enabled():
+        raise HTTPException(status_code=503, detail="query logging is off: set DATABASE_URL")
+    log = query_log.get()
+    return {name: analytics.run(log, name) for name in STATS_QUERIES}
 
 
 @app.get("/documents")

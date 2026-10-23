@@ -22,6 +22,7 @@ The RAG pipeline: question -> retrieve -> augment -> generate -> cited answer.
 
 import re
 import sys
+import time
 
 from generator import GenerationError, get_generator
 from grounding import unsupported_numbers
@@ -136,6 +137,26 @@ def condense_question(question: str, history: list[dict], generator) -> str:
     return rewritten or question
 
 
+def _ms_since(start: float) -> int:
+    return round((time.perf_counter() - start) * 1000)
+
+
+class _MeteredGenerator:
+    """Wraps the generator to count LLM calls, tokens and time for the query log."""
+
+    def __init__(self, generator, result: dict):
+        self.generator = generator
+        self.result = result
+
+    def generate(self, system: str, prompt: str, temperature: float = 0.2) -> str:
+        start = time.perf_counter()
+        try:
+            return self.generator.generate(system, prompt, temperature, usage=self.result["usage"])
+        finally:
+            self.result["usage"]["llm_calls"] += 1
+            self.result["timings"]["llm_ms"] += _ms_since(start)
+
+
 def answer(question: str, history: list[dict] = None, top_k: int = DEFAULT_TOP_K, retriever=None, generator=None) -> dict:
     """Answer a question from the knowledge base.
 
@@ -147,8 +168,12 @@ def answer(question: str, history: list[dict] = None, top_k: int = DEFAULT_TOP_K
     uses), "search_query" (the question after condensing), "conflict" (True
     if the answer reports that its sources disagree), "unsupported_numbers"
     (numbers in the answer that none of its cited sources contain - see
-    grounding.py), and "error" (True only if the LLM call failed).
+    grounding.py), "error" (True only if the LLM call failed), and for the
+    query log: "outcome" (answered / refused_gate / refused_llm / error),
+    "timings" (total, retrieval and LLM milliseconds), "usage" (LLM calls
+    and tokens), "model" and "retrieval_mode".
     """
+    started = time.perf_counter()
     retriever = retriever or get_retriever()
     generator = generator or get_generator()
     result = {
@@ -160,33 +185,46 @@ def answer(question: str, history: list[dict] = None, top_k: int = DEFAULT_TOP_K
         "conflict": False,
         "unsupported_numbers": [],
         "error": False,
+        "outcome": "answered",
+        "model": getattr(generator, "model", None),
+        "retrieval_mode": getattr(retriever, "mode", None),
+        "timings": {"total_ms": 0, "retrieval_ms": None, "llm_ms": 0},
+        "usage": {"llm_calls": 0, "prompt_tokens": 0, "output_tokens": 0},
     }
+    generator = _MeteredGenerator(generator, result)
 
     try:
         search_query = condense_question(question, history, generator) if history else question
         result["search_query"] = search_query
 
+        retrieval_started = time.perf_counter()
         hits = retriever.search(search_query, top_k=top_k)
+        result["timings"]["retrieval_ms"] = _ms_since(retrieval_started)
         result["sources"] = [{"n": n, **hit} for n, hit in enumerate(hits, start=1)]
         if is_off_topic(hits):
             result["answer"] = NO_ANSWER
+            result["outcome"] = "refused_gate"
             return result
 
         prompt = f"Context:\n\n{format_context(hits)}\n\nQuestion: {search_query}"
         result["answer"] = generator.generate(SYSTEM_PROMPT, prompt)
+        result["outcome"] = "refused_llm" if NO_ANSWER in result["answer"] else "answered"
+
+        result["cited"] = extract_citations(result["answer"], len(hits))
+        result["conflict"] = CONFLICT_MARKER in result["answer"]
+        result["unsupported_numbers"] = unsupported_numbers(
+            result["answer"],
+            [format_passage(hits[n - 1]) for n in result["cited"]],
+            question=f"{question} {search_query}",
+        )
+        return result
     except GenerationError as exc:
         result["answer"] = f"Cevap üretilemedi: {exc}"
         result["error"] = True
+        result["outcome"] = "error"
         return result
-
-    result["cited"] = extract_citations(result["answer"], len(hits))
-    result["conflict"] = CONFLICT_MARKER in result["answer"]
-    result["unsupported_numbers"] = unsupported_numbers(
-        result["answer"],
-        [format_passage(hits[n - 1]) for n in result["cited"]],
-        question=f"{question} {search_query}",
-    )
-    return result
+    finally:
+        result["timings"]["total_ms"] = _ms_since(started)
 
 
 if __name__ == "__main__":

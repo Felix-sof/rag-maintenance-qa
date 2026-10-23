@@ -19,6 +19,7 @@ def api_error(code):
 @pytest.fixture
 def script(monkeypatch):
     """Make every new client replay `outcomes` in order: an exception to raise, or a response."""
+    monkeypatch.setenv("GEMINI_API_KEY", "test-key")
     outcomes = []
     clients = []
 
@@ -92,3 +93,25 @@ def test_exhausted_daily_quota_fails_fast_without_waiting(script):
 
 def api_error_with(code, message):
     return errors.APIError(code, {"error": {"code": code, "message": message}})
+
+
+def test_token_usage_is_added_to_the_callers_counter(script):
+    class Usage:
+        prompt_token_count, candidates_token_count, thoughts_token_count = 120, 30, 15
+
+    class ResponseWithUsage(FakeResponse):
+        usage_metadata = Usage()
+
+    outcomes, _ = script
+    outcomes += [ResponseWithUsage(), ResponseWithUsage()]
+    usage = {}
+    GeminiGenerator().generate("sys", "prompt", usage=usage)
+    GeminiGenerator().generate("sys", "prompt", usage=usage)
+    assert usage == {"prompt_tokens": 240, "output_tokens": 90}  # thought tokens count as output
+
+
+def test_a_missing_api_key_is_a_generation_error_not_a_crash(monkeypatch):
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+    monkeypatch.delenv("GOOGLE_API_KEY", raising=False)
+    with pytest.raises(GenerationError, match="GEMINI_API_KEY"):
+        GeminiGenerator().generate("sys", "prompt")

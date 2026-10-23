@@ -33,6 +33,10 @@ locally on CPU; generation uses the Google Gemini free tier.
 - **ChromaDB or PostgreSQL + pgvector**: the index runs locally in ChromaDB or in
   Postgres (HNSW vector index, full-text search, SQL migrations), with
   identical retrieval scores on both.
+- **SQL analytics**: every question is logged to Postgres. Six commented SQL
+  queries (percentiles, window functions, `ROLLUP`) report volume, refusal
+  rate, latency, the most used documents and the hardest questions, through
+  `/stats` and a Streamlit page.
 - **Grounded answers**: every claim is cited as `[n]`. Off-topic questions are
   refused by a score gate before any LLM call, and near-domain gaps are refused
   by the prompt.
@@ -48,7 +52,7 @@ locally on CPU; generation uses the Google Gemini free tier.
   question before retrieval.
 - **Measured, not assumed**: a retrieval eval and an off-topic gate eval, both
   with a CI quality gate, an end-to-end answer eval against the live LLM, and
-  121 unit tests.
+  140 unit tests.
 
 ## Architecture
 
@@ -82,7 +86,8 @@ locally on CPU; generation uses the Google Gemini free tier.
 | `grounding.py` | The number check: compares every number in the answer, by value (`8,6` = `8.6`, `13.000` = `13,000`), with the passages it cites. |
 | `generator.py` | Gemini client. Retries 429/5xx and dropped TLS connections on fresh clients, and fails fast when the daily quota is exhausted. |
 | `app.py` | Streamlit chat UI: cited answers, conflict and unsupported-number warnings, source inspector (which retriever found each chunk and its rerank score), document upload and delete. |
-| `api.py` | FastAPI: `/ask`, `/search` (with `?mode=` to compare retrievers), `/documents` (GET/POST/DELETE), `/health`. |
+| `api.py` | FastAPI: `/ask`, `/search` (with `?mode=` to compare retrievers), `/documents` (GET/POST/DELETE), `/stats`, `/health`. |
+| `query_log.py` · `analytics/` | Every question logged to Postgres, and the SQL that reads the log: volume, refusal rate, latency percentiles, top documents, hard questions, weekly trend. |
 
 ## Design decisions, with numbers
 
@@ -239,6 +244,58 @@ answers changed by hand (1380 to 1500 rpm, 8,6 to 8,2 K, and four more) it
 catches every one. It can't judge a claim without a number, and it flags a
 count the model made itself ("şu 4 neden"), because no passage states it.
 
+### Query analytics in SQL
+
+When `DATABASE_URL` is set, every question the API or the UI handles is logged
+to Postgres (`query_log.py`, schema in `db/migrations/002_query_logs.sql`):
+
+- **`query_logs`**: one row per question. It records the question and its
+  condensed form, an `outcome`, the best cosine and rerank scores, latency
+  (total, retrieval, LLM), LLM calls and tokens, the model and the retrieval
+  mode.
+- **`query_log_hits`**: one row per retrieved chunk, with its rank, scores and
+  whether the answer cited it.
+
+Design choices:
+
+- **`outcome` is one column with a `CHECK` constraint**: `answered`,
+  `refused_gate`, `refused_llm` or `error`. Separate `refused`/`error` flags
+  could hold impossible combinations.
+- **Hits are rows, not an array**: "most retrieved documents" becomes a
+  `GROUP BY`. They carry no foreign key to `chunks` and keep a copy of the
+  source and section, because a rebuild replaces the chunks and the log must
+  outlive it.
+- **The row is written before the response goes out, not in a background
+  task**: Cloud Run only gives an instance CPU while it handles a request.
+- **Logging can't break an answer**: a failure is logged as a warning and
+  swallowed. After a failure, logging pauses for a minute, so an unreachable
+  database doesn't make every request wait out a connection timeout.
+
+The queries are plain SQL files in `analytics/`, each commented with what it
+measures:
+
+| File | Measures | SQL worth a look |
+|---|---|---|
+| `01_daily_volume.sql` | questions per day and how they ended | `count(*) FILTER (WHERE ...)`, days cut in Turkish time |
+| `02_refusal_rate.sql` | refusal rate, and the share refused by the gate without an LLM call | `GROUP BY ROLLUP` for a total row |
+| `03_latency_percentiles.sql` | p50 / p95 latency per outcome, retrieval vs LLM time | `percentile_cont(...) WITHIN GROUP` |
+| `04_top_documents.sql` | documents retrieved most, and how often they're then cited | join of hits to logs, `cite_rate` |
+| `05_hard_questions.sql` | the weakest matches, LLM refusals, unsupported numbers | `percent_rank()`, `DISTINCT ON` |
+| `06_weekly_trend.sql` | week-over-week change, 4-week moving average, running total | `generate_series` to fill empty weeks, `lag()`, window frames |
+
+`tests/test_query_log.py` seeds rows whose statistics can be worked out by hand
+and checks each query's output. For example, latencies of 100, 300 and 500 ms
+must give p50 = 300 and an interpolated p95 = 480.
+
+`GET /stats` returns the first four queries as JSON. The Streamlit app has an
+**analytics** page with all six.
+
+There are no real users yet, so `python -m analytics.replay` produces the data:
+it sends the 130 gate-eval questions through the real pipeline and logs them
+as `source = 'replay'`, which keeps them apart from real `api` and `ui`
+traffic in every query. It resumes where it stopped, and it stops by itself
+when the Gemini free tier's daily quota runs out.
+
 ### Conflicting sources
 
 Each document has a `priority` (default: `reference` 2, `example` 1) and an
@@ -341,6 +398,8 @@ curl -X POST http://localhost:8000/ask -H "Content-Type: application/json" \
 - `unsupported_numbers`: numbers in the answer that none of its cited sources
   contain (empty when everything checks out)
 - `search_query`: the condensed question
+- `outcome`: `answered`, `refused_gate`, `refused_llm` or `error`
+- `timings` (total, retrieval and LLM ms) and `usage` (LLM calls and tokens)
 
 ### PostgreSQL + pgvector
 
@@ -369,17 +428,20 @@ first connection, or explicitly with `python -m db.migrate`.
 | `VECTOR_BACKEND` | `chroma` | `chroma` or `pgvector` |
 | `DATABASE_URL` | | Postgres connection string, for `pgvector` |
 | `KEYWORD_BACKEND` | `bm25` | `bm25`, or with `pgvector` also `pg_fts_stems` / `pg_fts_turkish` |
+| `QUERY_LOG` | `on` | Questions are logged to `DATABASE_URL` when it is set; `off` turns that off. |
 
 ## Testing and evaluation
 
 ```bash
 pip install -r requirements-dev.txt
-pytest                                       # 121 tests, ~20 s, offline (14 need TEST_DATABASE_URL)
+pytest                                       # 140 tests, ~20 s, offline (26 need TEST_DATABASE_URL)
 python -m evals.retrieval_eval               # retriever comparison (offline, free)
 python -m evals.retrieval_eval --mode hybrid_rerank   # per-question detail
 python -m evals.gate_eval                    # off-topic gate comparison (offline, free)
 python -m evals.retrieval_eval --compare-backends   # ChromaDB vs pgvector (needs DATABASE_URL)
 python -m evals.answer_eval                  # end to end, against the live Gemini API
+python -m analytics.replay --limit 30        # log eval questions through the pipeline (Gemini + DATABASE_URL)
+python -m analytics                          # run the analytics queries and print the results
 ```
 
 - **Unit tests** use a deterministic hashing embedder, a fake LLM and PDFs
@@ -392,6 +454,7 @@ python -m evals.answer_eval                  # end to end, against the live Gemi
   - the number check,
   - the pgvector backend: migrations, rebuilds, vector and full-text search,
     Turkish lowercasing,
+  - the query log and every analytics query, on hand-checkable data,
   - the Gemini retry and quota policy,
   - the API and the eval grader.
 - **Retrieval eval**: the table above. CI fails if the default mode's MRR drops
@@ -452,8 +515,11 @@ right section was never retrieved, or the model didn't use it.
 ├── grounding.py            number check on the answer
 ├── generator.py            Gemini client with retries
 ├── app.py · api.py         Streamlit UI · FastAPI
+├── query_log.py            logs every question to Postgres
+├── analytics/              the analytics SQL, the report and the replay
+├── pages/analytics.py      Streamlit analytics page
 ├── evals/                  retrieval_eval.py, gate_eval.py, answer_eval.py, results/
-├── tests/                  121 tests
+├── tests/                  140 tests
 ├── Dockerfile · docker-compose.yml
 └── .github/workflows/ci.yml
 ```

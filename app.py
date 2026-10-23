@@ -8,6 +8,7 @@ from datetime import date
 
 import streamlit as st
 
+import query_log
 import rag
 from chunking import META_SUFFIX
 from generator import MODEL
@@ -139,6 +140,7 @@ if question:
         with st.spinner("Belgeler aranıyor..."):
             history = [{"question": t["question"], "answer": t["answer"]} for t in st.session_state.turns]
             result = rag.answer(question, history=history, top_k=top_k)
+            query_log.record(result, source="ui")
         if result["error"]:
             st.error(result["answer"])
         else:

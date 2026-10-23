@@ -58,7 +58,11 @@ class GeminiGenerator:
         self.model = model
         self._client = None
 
-    def generate(self, system: str, prompt: str, temperature: float = 0.2) -> str:
+    def generate(self, system: str, prompt: str, temperature: float = 0.2, usage: dict = None) -> str:
+        """The model's answer. If `usage` is given, the call's token counts are added to it
+        ("prompt_tokens", "output_tokens"; output includes a thinking model's thought tokens)."""
+        if not os.environ.get("GEMINI_API_KEY") and not os.environ.get("GOOGLE_API_KEY"):
+            raise GenerationError("GEMINI_API_KEY is not set (see .env.example)")
         config = types.GenerateContentConfig(system_instruction=system, temperature=temperature)
         api_failures = network_failures = 0
         while True:
@@ -68,6 +72,12 @@ class GeminiGenerator:
                 response = self._client.models.generate_content(
                     model=self.model, contents=prompt, config=config
                 )
+                metadata = getattr(response, "usage_metadata", None)
+                if usage is not None and metadata is not None:
+                    usage["prompt_tokens"] = usage.get("prompt_tokens", 0) + (metadata.prompt_token_count or 0)
+                    usage["output_tokens"] = usage.get("output_tokens", 0) + (
+                        (metadata.candidates_token_count or 0) + (getattr(metadata, "thoughts_token_count", 0) or 0)
+                    )
                 return (response.text or "").strip()
             except errors.APIError as exc:
                 message = f"Gemini API error ({exc.code}): {exc.message}"
