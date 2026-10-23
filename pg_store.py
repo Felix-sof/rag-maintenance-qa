@@ -93,8 +93,22 @@ class PgVectorStore(KnowledgeBase):
         return rows[0][0] if rows else ""
 
     def _ready(self) -> None:
-        if not self._built:
-            self.build()
+        """Build the index on first use if it is stale - except in a READ_ONLY deployment.
+
+        There the index is built once by the deploy pipeline
+        (`python vector_store.py --rebuild` against the production database),
+        and a serving instance only reads it: an instance must never re-embed
+        the documents in a user's request, nor rewrite the index from a copy
+        of the documents that may be older than the one deployed.
+        """
+        if self._built:
+            return
+        if os.environ.get("READ_ONLY", "0") == "1":
+            if not self._stored_fingerprint():
+                raise RuntimeError("the index is empty: run `python vector_store.py --rebuild` against this database")
+            self._built = True
+            return
+        self.build()
 
     def build(self, force: bool = False) -> dict:
         """(Re)build the index if the documents/model changed since the last build, or if forced.

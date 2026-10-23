@@ -12,12 +12,21 @@ DELETE /documents/{source}  delete an uploaded document (uploads/ only) and re-i
 GET    /health              index stats
 GET    /stats               query-log analytics: daily volume, refusal rate, latency, top documents
                             (needs DATABASE_URL; the SQL is in analytics/)
+
+For a public deployment:
+    READ_ONLY=1     uploads and deletes are refused; the documents are those the
+                    deployment indexed (cloud disks don't keep uploaded files anyway)
+    WARM_UP=1       load the models before accepting traffic, so the first user
+                    doesn't wait for them (see lifespan below)
+    /ask is rate limited per client and per day (rate_limit.py).
 """
 
+import os
+from contextlib import asynccontextmanager
 from datetime import date
 from typing import Literal, Optional
 
-from fastapi import FastAPI, File, Form, HTTPException, Query, UploadFile
+from fastapi import Depends, FastAPI, File, Form, HTTPException, Query, Request, UploadFile
 from pydantic import BaseModel, Field
 
 import analytics
@@ -25,12 +34,45 @@ import query_log
 import rag
 import retriever
 from generator import MODEL
+from rate_limit import RateLimiter
 from vector_store import MAX_TOP_K, get_store
+
+
+def read_only() -> bool:
+    return os.environ.get("READ_ONLY", "0") == "1"
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """With WARM_UP=1, load the embedding model and the reranker (and connect to the index) at startup.
+
+    Uvicorn starts accepting requests only after this returns, and Cloud Run
+    sends traffic only once the startup probe (/health) passes - so a cold
+    start costs the platform's time, not the first user's.
+    """
+    if os.environ.get("WARM_UP", "0") == "1":
+        retriever.get_retriever().search("warm-up", top_k=1)
+    yield
+
 
 app = FastAPI(
     title="Maintenance RAG API",
     description="Question answering over a milling-machine maintenance knowledge base, with cited sources.",
+    lifespan=lifespan,
 )
+limiter = RateLimiter()
+
+
+def rate_limited(request: Request) -> None:
+    """Dependency for the endpoints that call the LLM."""
+    allowed, wait = limiter.check(request.client.host if request.client else "unknown")
+    if not allowed:
+        raise HTTPException(status_code=429, detail="too many requests", headers={"Retry-After": str(wait)})
+
+
+def writable() -> None:
+    if read_only():
+        raise HTTPException(status_code=403, detail="this deployment is read-only: documents are managed by its index")
 
 
 class Turn(BaseModel):
@@ -51,6 +93,7 @@ _retrievers_by_mode: dict[str, retriever.Retriever] = {}
 def health() -> dict:
     return {
         "status": "ok",
+        "read_only": read_only(),
         "model": MODEL,
         "retrieval_mode": retriever.get_retriever().mode,
         "index": get_store().stats(),
@@ -72,7 +115,7 @@ def search(
     return {"query": q, "mode": active.mode, "results": active.search(q, top_k=top_k)}
 
 
-@app.post("/ask")
+@app.post("/ask", dependencies=[Depends(rate_limited)])
 def ask(req: AskRequest) -> dict:
     result = rag.answer(req.question, history=[t.model_dump() for t in req.history], top_k=req.top_k)
     query_log.record(result, source="api")
@@ -96,7 +139,7 @@ def list_documents() -> dict:
     return {"documents": store.chunk_counts(), "skipped": store.skipped()}
 
 
-@app.post("/documents", status_code=201)
+@app.post("/documents", status_code=201, dependencies=[Depends(writable)])
 async def upload_document(
     file: UploadFile = File(..., description="PDF, Markdown (.md) or text (.txt) document"),
     doc_type: Literal["reference", "example"] = Form("reference"),
@@ -116,7 +159,7 @@ async def upload_document(
     }
 
 
-@app.delete("/documents/{source:path}")
+@app.delete("/documents/{source:path}", dependencies=[Depends(writable)])
 def delete_document(source: str) -> dict:
     try:
         get_store().delete_upload(source)

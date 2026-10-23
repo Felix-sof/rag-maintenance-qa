@@ -145,6 +145,23 @@ def test_migrations_run_once(make_store):
     ]
 
 
+def test_a_read_only_instance_reads_the_index_but_never_rebuilds_it(make_store, monkeypatch):
+    store = make_store()
+    store.build()
+    (store.docs_dir / "rnf.md").write_text("# RNF\n\nRNF rastgele arızadır.\n", encoding="utf-8")
+
+    monkeypatch.setenv("READ_ONLY", "1")
+    reader = type(store)(store.docs_dir, DATABASE_URL, store.embedder, schema=store.schema)
+    assert reader.chunk_counts() == {"arizalar.md": 3}  # the stale index is served as built
+    reader.close()
+
+
+def test_a_read_only_instance_refuses_an_empty_index(make_store, monkeypatch):
+    monkeypatch.setenv("READ_ONLY", "1")
+    with pytest.raises(RuntimeError, match="--rebuild"):
+        make_store().search("OSF")
+
+
 def test_an_embedding_of_the_wrong_size_is_refused(make_store):
     store = make_store(embedder=HashEmbedder(dim=256))
     with pytest.raises(ValueError, match="vector\\(384\\)"):

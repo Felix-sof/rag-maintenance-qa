@@ -83,3 +83,21 @@ def test_upload_rejects_unsupported_type(client):
 
 def test_built_in_documents_cannot_be_deleted(client):
     assert client.delete("/documents/safety.md").status_code == 400
+
+
+def test_ask_is_rate_limited(client, monkeypatch):
+    import rate_limit
+
+    monkeypatch.setattr(api, "limiter", rate_limit.RateLimiter(per_minute=2, per_day=100))
+    monkeypatch.setattr(rag, "answer", lambda question, history, top_k: {"answer": "ok"})
+    codes = [client.post("/ask", json={"question": "HDF?"}).status_code for _ in range(3)]
+    assert codes == [200, 200, 429]
+    assert int(client.post("/ask", json={"question": "HDF?"}).headers["Retry-After"]) > 0
+
+
+def test_read_only_deployment_refuses_uploads_and_deletes(client, monkeypatch):
+    monkeypatch.setenv("READ_ONLY", "1")
+    upload = client.post("/documents", files={"file": ("notlar.md", b"# Not", "text/markdown")})
+    assert upload.status_code == 403
+    assert client.delete("/documents/uploads/notlar.md").status_code == 403
+    assert client.get("/health").json()["read_only"] is True
