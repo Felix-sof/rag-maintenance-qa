@@ -112,12 +112,21 @@ class QueryLog:
                 if attempt == 2:
                     raise
 
-    def fetch(self, query: str) -> list[dict]:
+    def llm_answers_last_24h(self, source: str) -> int:
+        """Questions from `source` that reached the LLM in the last 24 hours (the persistent daily cap)."""
+        rows = self.fetch(
+            "SELECT count(*) AS n FROM query_logs"
+            " WHERE source = %s AND llm_calls > 0 AND created_at > now() - interval '24 hours'",
+            (source,),
+        )
+        return rows[0]["n"]
+
+    def fetch(self, query: str, params=None) -> list[dict]:
         """Rows of a read query, as dicts (the analytics queries)."""
         from psycopg.rows import dict_row
 
         with self._lock, self.connection().cursor(row_factory=dict_row) as cur:
-            return cur.execute(query).fetchall()
+            return cur.execute(query, params).fetchall()
 
     def close(self) -> None:
         if self._conn is not None:

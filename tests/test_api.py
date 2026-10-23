@@ -6,7 +6,12 @@ import rag
 
 
 @pytest.fixture
-def client():
+def client(monkeypatch):
+    import rate_limit
+
+    # fresh counters per test: the limits are per process, and the tests share one
+    monkeypatch.setattr(api, "limiter", rate_limit.RateLimiter())
+    monkeypatch.setattr(api, "light_limiter", rate_limit.RateLimiter(per_minute=60, per_day=5_000))
     return TestClient(api.app)
 
 
@@ -101,3 +106,50 @@ def test_read_only_deployment_refuses_uploads_and_deletes(client, monkeypatch):
     assert upload.status_code == 403
     assert client.delete("/documents/uploads/notlar.md").status_code == 403
     assert client.get("/health").json()["read_only"] is True
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"question": "x" * 501},
+        {"question": "HDF?", "history": [{"question": "q", "answer": "a"}] * 5},
+        {"question": "HDF?", "history": [{"question": "q", "answer": "a" * 2001}]},
+    ],
+)
+def test_oversized_input_is_rejected_before_any_work(client, payload):
+    assert client.post("/ask", json=payload).status_code == 422
+
+
+def test_search_has_a_looser_limit_and_a_size_cap(client, monkeypatch):
+    import rate_limit
+
+    monkeypatch.setattr(api, "light_limiter", rate_limit.RateLimiter(per_minute=2, per_day=100))
+    assert client.get("/search", params={"q": "OSF"}).status_code == 200
+    assert client.get("/search", params={"q": "x" * 501}).status_code == 422
+    # the limit is checked before the input, so rejected requests count too: garbage isn't free
+    assert client.get("/search", params={"q": "OSF"}).status_code == 429
+
+
+def test_daily_cap_is_also_read_from_the_query_log(client, monkeypatch):
+    """A restart clears the in-memory counter; the logged answers of the last 24 h still count."""
+    import query_log
+
+    class LoggedToday:
+        def llm_answers_last_24h(self, source):
+            return 20 if source == "api" else 0
+
+    monkeypatch.setattr(api, "PER_DAY", 20)
+    monkeypatch.setattr(query_log, "enabled", lambda: True)
+    monkeypatch.setattr(query_log, "get", lambda: LoggedToday())
+    monkeypatch.setattr(rag, "answer", lambda question, history, top_k: {"answer": "ok"})
+    resp = client.post("/ask", json={"question": "HDF?"})
+    assert resp.status_code == 429 and resp.headers["Retry-After"] == "3600"
+
+
+def test_health_does_not_query_the_index_on_every_call(client, monkeypatch):
+    calls = []
+    monkeypatch.setattr(api, "_health_cache", {"at": float("-inf"), "index": None})
+    monkeypatch.setattr(api, "get_store", lambda: type("S", (), {"stats": lambda self: calls.append(1) or {}})())
+    for _ in range(5):
+        assert client.get("/health").status_code == 200
+    assert calls == [1]
