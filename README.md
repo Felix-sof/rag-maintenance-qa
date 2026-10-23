@@ -52,7 +52,7 @@ locally on CPU; generation uses the Google Gemini free tier.
   question before retrieval.
 - **Measured, not assumed**: a retrieval eval and an off-topic gate eval, both
   with a CI quality gate, an end-to-end answer eval against the live LLM, and
-  154 unit tests.
+  171 unit tests.
 
 ## Architecture
 
@@ -87,6 +87,7 @@ locally on CPU; generation uses the Google Gemini free tier.
 | `generator.py` | Gemini client. Retries 429/5xx and dropped TLS connections on fresh clients, and fails fast when the daily quota is exhausted. |
 | `app.py` | Streamlit chat UI: cited answers, conflict and unsupported-number warnings, source inspector (which retriever found each chunk and its rerank score), document upload and delete. |
 | `api.py` | FastAPI: `/ask`, `/search` (with `?mode=` to compare retrievers), `/documents` (GET/POST/DELETE), `/stats`, `/health`. |
+| `failure_rules.py` | The documented failure rules as code: assesses one process, with margins to every threshold. Tested against all 10,000 rows of the AI4I dataset. |
 | `rate_limit.py` | Per-client and global daily limits on `/ask`, the endpoint that calls Gemini. |
 | `deploy/Dockerfile` | The cloud image: API only, multi-stage, models baked in, read-only, models loaded before traffic. |
 | `query_log.py` · `analytics/` | Every question logged to Postgres, and the SQL that reads the log: volume, refusal rate, latency percentiles, top documents, hard questions, weekly trend. |
@@ -298,6 +299,42 @@ as `source = 'replay'`, which keeps them apart from real `api` and `ui`
 traffic in every query. It resumes where it stopped, and it stops by itself
 when the Gemini free tier's daily quota runs out.
 
+### The knowledge base, checked against the data
+
+The reference documents come from the description of the AI4I 2020 dataset, and
+the dataset itself is in the repository (`ai4i/`, CC BY 4.0, 10,000 processes,
+339 failures). `failure_rules.py` turns the documented rules into code, so they
+can be tested against the real labels. On every row:
+
+- the HDF rule reproduces all 115 HDF labels, PWF all 95 and OSF all 98;
+- none of the three rules raises a false alarm;
+- the check runs in CI (`tests/test_failure_rules.py`), so the knowledge base
+  can't drift away from the data unnoticed.
+
+Two modes are random by construction. TWF strikes at a random tool wear between
+200 and 240 minutes, so for TWF `assess()` reports the share of processes that
+failed at that wear level: 4.4% at 200-210 min, rising to 16.1% at 230-240.
+RNF is a 0.1% chance per process.
+
+**Rules or a model?** `python -m evals.failure_model_eval` predicts
+`machine_failure` for all 10,000 processes. The models are scored with 5-fold
+stratified cross-validation, so no row is predicted by a model that saw it.
+
+| Method | Precision | Recall | F1 | False alarms |
+|---|---|---|---|---|
+| The documented rules | **1.000** | **0.847** | **0.917** | **0** |
+| Gradient boosting, raw sensor columns | 0.862 | 0.664 | 0.750 | 36 |
+| Gradient boosting + the documents' quantities (ΔT, power, wear x torque) | 0.923 | 0.782 | 0.847 | 22 |
+
+- **The documents' quantities help the model.** Given temperature difference,
+  power and wear x torque, the same model goes from 0.750 to 0.847 F1.
+- **The rules still win.** They catch every failure that can be caught: 287 of
+  339 failures have a deterministic mode, so recall 0.847 is the ceiling. The
+  rest are TWF, RNF, or failures recorded without a mode.
+- **The rules are the right tool for this data.** It is synthetic and was
+  generated from these rules. A model can only approximate them, while the
+  rules also explain each verdict in the documents' own terms.
+
 ### A public endpoint on a zero budget
 
 The API is meant to run publicly on a free tier, where abuse costs money or takes
@@ -466,10 +503,11 @@ first connection, or explicitly with `python -m db.migrate`.
 
 ```bash
 pip install -r requirements-dev.txt
-pytest                                       # 154 tests, ~20 s, offline (29 need TEST_DATABASE_URL)
+pytest                                       # 171 tests, ~20 s, offline (29 need TEST_DATABASE_URL)
 python -m evals.retrieval_eval               # retriever comparison (offline, free)
 python -m evals.retrieval_eval --mode hybrid_rerank   # per-question detail
 python -m evals.gate_eval                    # off-topic gate comparison (offline, free)
+python -m evals.failure_model_eval           # documented rules vs gradient boosting on AI4I (offline)
 python -m evals.retrieval_eval --compare-backends   # ChromaDB vs pgvector (needs DATABASE_URL)
 python -m evals.answer_eval                  # end to end, against the live Gemini API
 python -m analytics.replay --limit 30        # log eval questions through the pipeline (Gemini + DATABASE_URL)
@@ -550,8 +588,10 @@ right section was never retrieved, or the model didn't use it.
 ├── query_log.py            logs every question to Postgres
 ├── analytics/              the analytics SQL, the report and the replay
 ├── pages/analytics.py      Streamlit analytics page
-├── evals/                  retrieval_eval.py, gate_eval.py, answer_eval.py, results/
-├── tests/                  154 tests
+├── failure_rules.py        the failure rules as code, checked against the dataset
+├── ai4i/                   the AI4I 2020 dataset (CC BY 4.0)
+├── evals/                  retrieval, gate, answer and failure-model evals, results/
+├── tests/                  171 tests
 ├── Dockerfile · docker-compose.yml   local images (UI + API)
 ├── deploy/Dockerfile       the cloud image (API only)
 └── .github/workflows/ci.yml
@@ -560,5 +600,6 @@ right section was never retrieved, or the model didn't use it.
 ## License
 
 The code has no license attached yet. `failure_modes.md` and
-`sensor_reference.md` are derived from the AI4I 2020 dataset description
-(CC BY 4.0, S. Matzka); keep that attribution if you redistribute them.
+`sensor_reference.md` are derived from the AI4I 2020 dataset description, and
+`ai4i/ai4i2020.csv` is the dataset itself (CC BY 4.0, S. Matzka); keep that
+attribution if you redistribute them.
