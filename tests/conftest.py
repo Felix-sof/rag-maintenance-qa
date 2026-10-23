@@ -43,11 +43,15 @@ class FakeGenerator:
         self.error = error
         self.calls = []  # [(system, prompt)]
 
-    def generate(self, system, prompt, temperature=0.2):
+    def generate(self, system, prompt, temperature=0.2, usage=None):
         self.calls.append((system, prompt))
         if self.error:
             raise self.error
-        return self.responses[min(len(self.calls), len(self.responses)) - 1]
+        response = self.responses[min(len(self.calls), len(self.responses)) - 1]
+        if usage is not None:  # one "token" per word, so tests can check the sums
+            usage["prompt_tokens"] = usage.get("prompt_tokens", 0) + len(prompt.split())
+            usage["output_tokens"] = usage.get("output_tokens", 0) + len(response.split())
+        return response
 
 
 class StubStore:
@@ -73,6 +77,7 @@ def offline(monkeypatch, tmp_path):
     import retriever
     import vector_store
 
+    monkeypatch.setenv("QUERY_LOG", "off")  # a DATABASE_URL in .env must not receive test traffic
     store = vector_store.VectorStore(index_dir=tmp_path / "index", embedder=HashEmbedder())
     monkeypatch.setattr(vector_store, "_store", store)
     # hybrid without the cross-encoder: no model download in tests

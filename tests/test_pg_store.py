@@ -139,7 +139,10 @@ def test_migrations_run_once(make_store):
     store = make_store()
     store.build()
     assert migrate(store._connection()) == []
-    assert _sql(store, "SELECT version FROM schema_migrations") == [("001_pgvector_index",)]
+    assert _sql(store, "SELECT version FROM schema_migrations ORDER BY version") == [
+        ("001_pgvector_index",),
+        ("002_query_logs",),
+    ]
 
 
 def test_an_embedding_of_the_wrong_size_is_refused(make_store):

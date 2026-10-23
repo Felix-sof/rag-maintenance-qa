@@ -20,8 +20,8 @@ import re
 import numpy as np
 from dotenv import load_dotenv
 
+import db
 from chunking import document_metadata, load_chunks
-from db.migrate import migrate
 from embeddings import Embedder
 from retriever import tokenize, turkish_lower
 from vector_store import DOCS_DIR, MAX_TOP_K, KnowledgeBase
@@ -56,17 +56,10 @@ class PgVectorStore(KnowledgeBase):
     # --- connection -------------------------------------------------------
 
     def _connect(self):
-        import psycopg
         from pgvector.psycopg import register_vector
-        from psycopg import sql
 
-        conn = psycopg.connect(self.database_url, autocommit=True)
-        conn.execute("CREATE EXTENSION IF NOT EXISTS vector")  # before search_path changes: lands in public
-        if self.schema:
-            conn.execute(sql.SQL("CREATE SCHEMA IF NOT EXISTS {}").format(sql.Identifier(self.schema)))
-            conn.execute(sql.SQL("SET search_path TO {}, public").format(sql.Identifier(self.schema)))
+        conn = db.connect(self.database_url, schema=self.schema)
         register_vector(conn)  # numpy arrays <-> the vector type
-        migrate(conn)
         return conn
 
     def _connection(self):

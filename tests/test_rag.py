@@ -130,6 +130,28 @@ class TestAnswer:
         out = rag.answer("HDF?", retriever=StubStore(hits), generator=FakeGenerator("Cevap [1]."))
         assert out["answer"] == "Cevap [1]."
 
+    def test_outcome_timings_and_usage_are_reported(self):
+        gen = FakeGenerator("Kesici takım değişiminin adımları nelerdir?", "Adımlar [1].")
+        history = [{"question": "Takım ne zaman değiştirilir?", "answer": "Aşınınca [1]."}]
+        out = rag.answer("Peki adımları neler?", history=history, retriever=StubStore(RELEVANT), generator=gen)
+
+        assert out["outcome"] == "answered"
+        assert out["usage"]["llm_calls"] == 2  # condense + answer
+        assert out["usage"]["output_tokens"] == 5 + 2  # FakeGenerator counts words
+        assert out["timings"]["retrieval_ms"] is not None
+        assert out["timings"]["total_ms"] >= out["timings"]["llm_ms"]
+
+    def test_outcome_tells_the_two_refusals_and_errors_apart(self):
+        gate = rag.answer("Pizza?", retriever=StubStore([make_hit(rag.MIN_SCORE - 0.1)]), generator=FakeGenerator())
+        assert (gate["outcome"], gate["usage"]["llm_calls"]) == ("refused_gate", 0)
+
+        llm = rag.answer("Pres?", retriever=StubStore(RELEVANT), generator=FakeGenerator(rag.NO_ANSWER))
+        assert (llm["outcome"], llm["usage"]["llm_calls"]) == ("refused_llm", 1)
+
+        failed = rag.answer("HDF?", retriever=StubStore(RELEVANT), generator=FakeGenerator(error=GenerationError("x")))
+        assert failed["outcome"] == "error"
+        assert failed["timings"]["total_ms"] >= 0
+
     def test_uses_process_wide_retriever_and_generator_by_default(self):
         # autouse fixture: real knowledge/ docs + FakeGenerator; hash-embedder scores are
         # far below MIN_SCORE, so this exercises the wiring, not answer quality
