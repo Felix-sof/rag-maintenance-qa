@@ -52,7 +52,7 @@ locally on CPU; generation uses the Google Gemini free tier.
   question before retrieval.
 - **Measured, not assumed**: a retrieval eval and an off-topic gate eval, both
   with a CI quality gate, an end-to-end answer eval against the live LLM, and
-  140 unit tests.
+  147 unit tests.
 
 ## Architecture
 
@@ -87,6 +87,8 @@ locally on CPU; generation uses the Google Gemini free tier.
 | `generator.py` | Gemini client. Retries 429/5xx and dropped TLS connections on fresh clients, and fails fast when the daily quota is exhausted. |
 | `app.py` | Streamlit chat UI: cited answers, conflict and unsupported-number warnings, source inspector (which retriever found each chunk and its rerank score), document upload and delete. |
 | `api.py` | FastAPI: `/ask`, `/search` (with `?mode=` to compare retrievers), `/documents` (GET/POST/DELETE), `/stats`, `/health`. |
+| `rate_limit.py` | Per-client and global daily limits on `/ask`, the endpoint that calls Gemini. |
+| `deploy/Dockerfile` | The cloud image: API only, multi-stage, models baked in, read-only, models loaded before traffic. |
 | `query_log.py` · `analytics/` | Every question logged to Postgres, and the SQL that reads the log: volume, refusal rate, latency percentiles, top documents, hard questions, weekly trend. |
 
 ## Design decisions, with numbers
@@ -429,12 +431,16 @@ first connection, or explicitly with `python -m db.migrate`.
 | `DATABASE_URL` | | Postgres connection string, for `pgvector` |
 | `KEYWORD_BACKEND` | `bm25` | `bm25`, or with `pgvector` also `pg_fts_stems` / `pg_fts_turkish` |
 | `QUERY_LOG` | `on` | Questions are logged to `DATABASE_URL` when it is set; `off` turns that off. |
+| `READ_ONLY` | `0` | `1` in a public deployment: uploads and deletes are refused, and the pgvector index is served as built, never rebuilt by a serving instance. |
+| `WARM_UP` | `0` | `1` loads the models at startup, before the API accepts requests. |
+| `RATE_LIMIT_PER_MINUTE` | `10` | `/ask` requests per client per minute |
+| `ASK_LIMIT_PER_DAY` | `200` | `/ask` requests per 24 hours from everyone together; caps the Gemini spend |
 
 ## Testing and evaluation
 
 ```bash
 pip install -r requirements-dev.txt
-pytest                                       # 140 tests, ~20 s, offline (26 need TEST_DATABASE_URL)
+pytest                                       # 147 tests, ~20 s, offline (28 need TEST_DATABASE_URL)
 python -m evals.retrieval_eval               # retriever comparison (offline, free)
 python -m evals.retrieval_eval --mode hybrid_rerank   # per-question detail
 python -m evals.gate_eval                    # off-topic gate comparison (offline, free)
@@ -519,8 +525,9 @@ right section was never retrieved, or the model didn't use it.
 ├── analytics/              the analytics SQL, the report and the replay
 ├── pages/analytics.py      Streamlit analytics page
 ├── evals/                  retrieval_eval.py, gate_eval.py, answer_eval.py, results/
-├── tests/                  140 tests
-├── Dockerfile · docker-compose.yml
+├── tests/                  147 tests
+├── Dockerfile · docker-compose.yml   local images (UI + API)
+├── deploy/Dockerfile       the cloud image (API only)
 └── .github/workflows/ci.yml
 ```
 

@@ -74,12 +74,22 @@ jobs:
         run: python -m evals.retrieval_eval --compare-backends
 
   docker:
-    name: Docker image builds and answers a search
+    name: Docker images build and answer a search
     runs-on: ubuntu-latest
+    services:
+      postgres:  # throwaway database for the cloud image's smoke test
+        image: pgvector/pgvector:pg17
+        env:
+          POSTGRES_PASSWORD: postgres
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres" --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      HF_TOKEN: ${{ secrets.HF_TOKEN }}  # optional; empty when the secret isn't set
     steps:
       - uses: actions/checkout@v4
       - name: Build image (models baked in)
-        run: docker build -t rag-maintenance-qa .
+        run: docker build $([ -n "$HF_TOKEN" ] && echo --secret id=hf_token,env=HF_TOKEN) -t rag-maintenance-qa .
       - name: Smoke test - index the knowledge base and run a hybrid search inside the container
         run: |
           docker run --rm rag-maintenance-qa python -c "
@@ -88,3 +98,25 @@ jobs:
           print(hits[0]['source'], '>', hits[0]['section'], hits[0]['score'])
           assert 'HDF' in hits[0]['section'], hits[0]
           "
+      - name: Build the cloud image (API only, multi-stage)
+        run: docker build $([ -n "$HF_TOKEN" ] && echo --secret id=hf_token,env=HF_TOKEN) -f deploy/Dockerfile -t rag-api .
+      - name: Cloud image size
+        run: |
+          echo "uncompressed: $(( $(docker image inspect rag-api --format '{{.Size}}') / 1000000 )) MB"
+          echo "compressed (roughly what a registry stores): $(( $(docker save rag-api | gzip -1 | wc -c) / 1000000 )) MB"
+      - name: Smoke test the cloud image - index into Postgres, then serve it read-only
+        run: |
+          DB=postgresql://postgres:postgres@localhost:5432/postgres
+          docker run --rm --network host -e DATABASE_URL=$DB -e READ_ONLY=0 rag-api python vector_store.py --rebuild
+          start=$(date +%s)
+          docker run -d --name api --network host -e DATABASE_URL=$DB -e PORT=8080 rag-api
+          for i in $(seq 1 90); do curl -sf localhost:8080/health > /dev/null && break; sleep 1; done
+          echo "ready after $(( $(date +%s) - start )) s (container start + model warm-up)"
+          curl -sf "localhost:8080/search?q=HDF&top_k=1" | python3 -c "
+          import json, sys
+          hit = json.load(sys.stdin)['results'][0]
+          print(hit['section'], hit['ranks'])
+          assert 'HDF' in hit['section'], hit
+          "
+          test "$(curl -s -o /dev/null -w '%{http_code}' -X DELETE localhost:8080/documents/uploads/x.md)" = 403
+          docker logs api 2>&1 | tail -5

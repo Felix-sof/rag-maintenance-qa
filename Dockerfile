@@ -19,14 +19,17 @@ WORKDIR /app
 # CPU-only PyTorch first: otherwise sentence-transformers pulls the multi-GB CUDA build
 RUN pip install torch --index-url https://download.pytorch.org/whl/cpu
 
-COPY requirements.txt .
+COPY requirements.txt requirements-api.txt ./
 RUN pip install -r requirements.txt
 
 ARG PRELOAD_MODELS=true
 ARG EMBED_MODEL=intfloat/multilingual-e5-small
 ARG RERANK_MODEL=cross-encoder/mmarco-mMiniLMv2-L12-H384-v1
 ENV EMBED_MODEL=${EMBED_MODEL} RERANK_MODEL=${RERANK_MODEL}
-RUN if [ "$PRELOAD_MODELS" = "true" ]; then \
+# an optional Hugging Face token (build secret, never stored in a layer) avoids anonymous-download 429s
+RUN --mount=type=secret,id=hf_token \
+    if [ -s /run/secrets/hf_token ]; then export HF_TOKEN="$(cat /run/secrets/hf_token)"; fi; \
+    if [ "$PRELOAD_MODELS" = "true" ]; then \
       python -c "from sentence_transformers import SentenceTransformer, CrossEncoder; \
 SentenceTransformer('${EMBED_MODEL}'); CrossEncoder('${RERANK_MODEL}')"; \
     fi

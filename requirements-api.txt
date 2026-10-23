@@ -1,0 +1,12 @@
+# What the API service needs - and all the cloud image installs (deploy/Dockerfile).
+google-genai>=2.29.0
+python-dotenv>=1.2.3
+certifi
+sentence-transformers>=6.1.0
+fastapi>=0.141.1
+uvicorn[standard]>=0.53.0
+rank_bm25>=0.2.2
+pypdf>=6.19.0
+python-multipart>=0.0.32
+psycopg[binary]>=3.3.6
+pgvector>=0.5.1

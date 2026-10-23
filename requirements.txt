@@ -1,13 +1,4 @@
-google-genai>=2.29.0
-python-dotenv>=1.2.3
-certifi
+-r requirements-api.txt
+# local only: the ChromaDB index and the Streamlit UI
 chromadb>=1.5.9
-sentence-transformers>=6.1.0
-fastapi>=0.141.1
-uvicorn[standard]>=0.53.0
 streamlit>=1.63.0
-rank_bm25>=0.2.2
-pypdf>=6.19.0
-python-multipart>=0.0.32
-psycopg[binary]>=3.3.6
-pgvector>=0.5.1
