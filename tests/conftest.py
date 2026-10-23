@@ -36,15 +36,23 @@ class HashEmbedder:
 
 
 class FakeGenerator:
-    """Stands in for GeminiGenerator. `responses` are returned in order (last one repeats)."""
+    """Stands in for GeminiGenerator. `responses` are returned in order (last one repeats).
 
-    def __init__(self, *responses, error=None):
+    `tool_calls` are the (name, args) the fake model requests in generate_with_tools
+    before it answers - one extra "LLM call", as with the real model.
+    """
+
+    def __init__(self, *responses, error=None, tool_calls=()):
         self.responses = list(responses) or ["Cevap [1]."]
         self.error = error
+        self.tool_calls = list(tool_calls)
         self.calls = []  # [(system, prompt)]
+        self.tools_offered = None
 
     def generate(self, system, prompt, temperature=0.2, usage=None):
         self.calls.append((system, prompt))
+        if usage is not None:
+            usage["llm_calls"] = usage.get("llm_calls", 0) + 1
         if self.error:
             raise self.error
         response = self.responses[min(len(self.calls), len(self.responses)) - 1]
@@ -52,6 +60,15 @@ class FakeGenerator:
             usage["prompt_tokens"] = usage.get("prompt_tokens", 0) + len(prompt.split())
             usage["output_tokens"] = usage.get("output_tokens", 0) + len(response.split())
         return response
+
+    def generate_with_tools(self, system, prompt, tools, call_tool, temperature=0.2, usage=None):
+        self.tools_offered = [t["name"] for t in tools]
+        made = []
+        if self.tool_calls:
+            if usage is not None:
+                usage["llm_calls"] = usage.get("llm_calls", 0) + 1
+            made = [{"name": name, "args": args, "result": call_tool(name, args)} for name, args in self.tool_calls]
+        return self.generate(system, prompt, temperature, usage=usage), made
 
 
 class StubStore:

@@ -22,6 +22,8 @@ MAX_RETRIES = 5  # for API errors (429/5xx): each waits seconds to tens of secon
 MAX_NETWORK_RETRIES = 12  # for dropped TLS connections: usually transient, retried after 1s
 RETRYABLE_STATUS_CODES = {429, 500, 502, 503, 504}
 MAX_WAIT_SECONDS = 60  # a 429 asking us to wait longer than this is a daily quota, not a blip
+MAX_TOOL_ROUNDS = 1  # rounds of tool calls before the model must answer: at most 2 LLM calls a question
+MAX_CALLS_PER_ROUND = 3
 
 
 def retry_delay_seconds(message: str) -> float:
@@ -59,26 +61,75 @@ class GeminiGenerator:
         self._client = None
 
     def generate(self, system: str, prompt: str, temperature: float = 0.2, usage: dict = None) -> str:
-        """The model's answer. If `usage` is given, the call's token counts are added to it
-        ("prompt_tokens", "output_tokens"; output includes a thinking model's thought tokens)."""
+        """The model's answer to one prompt.
+
+        If `usage` is given, the call is counted in it: "llm_calls", and the
+        "prompt_tokens" / "output_tokens" (output includes a thinking model's
+        thought tokens).
+        """
+        config = types.GenerateContentConfig(system_instruction=system, temperature=temperature)
+        return (self._complete(prompt, config, usage).text or "").strip()
+
+    def generate_with_tools(
+        self, system: str, prompt: str, tools: list[dict], call_tool, temperature: float = 0.2, usage: dict = None
+    ) -> tuple[str, list[dict]]:
+        """Let the model call tools before it answers; returns (answer, the calls it made).
+
+        `tools` are {"name", "description", "parameters" (a JSON schema)};
+        `call_tool(name, args)` runs one and returns a JSON-able dict. The
+        model gets MAX_TOOL_ROUNDS rounds of calls; the next call is made
+        with tools switched off, so it has to answer in text.
+        """
+        declarations = [
+            types.FunctionDeclaration(name=t["name"], description=t["description"], parameters_json_schema=t["parameters"])
+            for t in tools
+        ]
+        with_tools = types.GenerateContentConfig(
+            system_instruction=system,
+            temperature=temperature,
+            tools=[types.Tool(function_declarations=declarations)],
+            automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True),  # we run the tools
+        )
+        text_only = with_tools.model_copy(
+            update={"tool_config": types.ToolConfig(function_calling_config=types.FunctionCallingConfig(mode="NONE"))}
+        )
+        contents = [types.Content(role="user", parts=[types.Part.from_text(text=prompt)])]
+        calls = []
+        for round_ in range(MAX_TOOL_ROUNDS + 1):
+            response = self._complete(contents, with_tools if round_ < MAX_TOOL_ROUNDS else text_only, usage)
+            requested = (response.function_calls or [])[:MAX_CALLS_PER_ROUND]
+            if not requested:
+                return (response.text or "").strip(), calls
+            # the model's turn goes back as it came: thinking models sign it, and want the signature returned
+            contents.append(response.candidates[0].content)
+            parts = []
+            for call in requested:
+                args = dict(call.args or {})
+                result = call_tool(call.name, args)
+                calls.append({"name": call.name, "args": args, "result": result})
+                parts.append(types.Part.from_function_response(name=call.name, response={"result": result}))
+            contents.append(types.Content(role="user", parts=parts))
+        return "", calls  # not reached: the last round has tools switched off
+
+    def _complete(self, contents, config, usage: dict = None):
+        """One model call, with retries for transient errors."""
         if not os.environ.get("GEMINI_API_KEY") and not os.environ.get("GOOGLE_API_KEY"):
             raise GenerationError("GEMINI_API_KEY is not set (see .env.example)")
-        config = types.GenerateContentConfig(system_instruction=system, temperature=temperature)
+        if usage is not None:
+            usage["llm_calls"] = usage.get("llm_calls", 0) + 1
         api_failures = network_failures = 0
         while True:
             if self._client is None or api_failures or network_failures:
                 self._client = _new_client()  # never retry on a connection pool that just failed
             try:
-                response = self._client.models.generate_content(
-                    model=self.model, contents=prompt, config=config
-                )
+                response = self._client.models.generate_content(model=self.model, contents=contents, config=config)
                 metadata = getattr(response, "usage_metadata", None)
                 if usage is not None and metadata is not None:
                     usage["prompt_tokens"] = usage.get("prompt_tokens", 0) + (metadata.prompt_token_count or 0)
                     usage["output_tokens"] = usage.get("output_tokens", 0) + (
                         (metadata.candidates_token_count or 0) + (getattr(metadata, "thoughts_token_count", 0) or 0)
                     )
-                return (response.text or "").strip()
+                return response
             except errors.APIError as exc:
                 message = f"Gemini API error ({exc.code}): {exc.message}"
                 if exc.code not in RETRYABLE_STATUS_CODES:

@@ -39,8 +39,8 @@ def test_search_can_compare_modes(client):
 def test_ask_passes_history_and_top_k(client, monkeypatch):
     seen = {}
 
-    def fake_answer(question, history, top_k):
-        seen.update(question=question, history=history, top_k=top_k)
+    def fake_answer(question, history, top_k, tools=None):
+        seen.update(question=question, history=history, top_k=top_k, tools=tools)
         return {"answer": "ok"}
 
     monkeypatch.setattr(rag, "answer", fake_answer)
@@ -49,7 +49,9 @@ def test_ask_passes_history_and_top_k(client, monkeypatch):
         json={"question": "Peki adımları?", "history": [{"question": "q", "answer": "a"}], "top_k": 2},
     )
     assert resp.status_code == 200
-    assert seen == {"question": "Peki adımları?", "history": [{"question": "q", "answer": "a"}], "top_k": 2}
+    assert seen == {
+        "question": "Peki adımları?", "history": [{"question": "q", "answer": "a"}], "top_k": 2, "tools": api.copilot_tools,
+    }
 
 
 @pytest.mark.parametrize("payload", [{"question": ""}, {"question": "x", "top_k": 99}, {}])
@@ -94,7 +96,7 @@ def test_ask_is_rate_limited(client, monkeypatch):
     import rate_limit
 
     monkeypatch.setattr(api, "limiter", rate_limit.RateLimiter(per_minute=2, per_day=100))
-    monkeypatch.setattr(rag, "answer", lambda question, history, top_k: {"answer": "ok"})
+    monkeypatch.setattr(rag, "answer", lambda question, history, top_k, tools=None: {"answer": "ok"})
     codes = [client.post("/ask", json={"question": "HDF?"}).status_code for _ in range(3)]
     assert codes == [200, 200, 429]
     assert int(client.post("/ask", json={"question": "HDF?"}).headers["Retry-After"]) > 0
@@ -141,7 +143,7 @@ def test_daily_cap_is_also_read_from_the_query_log(client, monkeypatch):
     monkeypatch.setattr(api, "PER_DAY", 20)
     monkeypatch.setattr(query_log, "enabled", lambda: True)
     monkeypatch.setattr(query_log, "get", lambda: LoggedToday())
-    monkeypatch.setattr(rag, "answer", lambda question, history, top_k: {"answer": "ok"})
+    monkeypatch.setattr(rag, "answer", lambda question, history, top_k, tools=None: {"answer": "ok"})
     resp = client.post("/ask", json={"question": "HDF?"})
     assert resp.status_code == 429 and resp.headers["Retry-After"] == "3600"
 
@@ -153,3 +155,11 @@ def test_health_does_not_query_the_index_on_every_call(client, monkeypatch):
     for _ in range(5):
         assert client.get("/health").status_code == 200
     assert calls == [1]
+
+
+def test_the_copilot_tools_can_be_switched_off(client, monkeypatch):
+    seen = {}
+    monkeypatch.setenv("COPILOT", "0")
+    monkeypatch.setattr(rag, "answer", lambda question, history, top_k, tools=None: seen.update(tools=tools) or {})
+    client.post("/ask", json={"question": "HDF?"})
+    assert seen == {"tools": None}

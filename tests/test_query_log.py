@@ -151,6 +151,7 @@ class TestAnalytics:
     def test_every_query_runs(self, seeded):
         assert set(analytics.queries()) == {
             "daily_volume", "refusal_rate", "latency_percentiles", "top_documents", "hard_questions", "weekly_trend",
+            "tool_usage",
         }
         for name in analytics.queries():
             assert analytics.run(seeded, name), name
@@ -183,6 +184,16 @@ class TestAnalytics:
         questions = [r["question"] for r in analytics.run(seeded, "hard_questions")]
         assert "Hidrolik pres?" in questions
         assert "Pizza?" not in questions  # a gate refusal is off-topic, not hard
+
+    def test_tool_usage_counts_each_tool_and_the_plain_answers(self, seeded):
+        with_tools = result()
+        with_tools["tool_calls"] = [{"name": "assess_process"}, {"name": "query_dataset"}]
+        with_tools["usage"]["llm_calls"] = 2
+        seeded.record(with_tools, source="api")
+        usage = {r["tool"]: r for r in analytics.run(seeded, "tool_usage")}
+        assert usage["assess_process"]["questions"] == usage["query_dataset"]["questions"] == 1
+        assert usage["(none)"]["questions"] == 5  # the seeded answers, refusals and error - not the gate refusal
+        assert float(usage["assess_process"]["avg_llm_calls"]) == 2
 
     def test_weekly_trend_has_no_gaps_and_a_running_total(self, seeded):
         backdate(seeded, seeded.record(result(), source="api"), days=21)  # three weeks back
@@ -226,3 +237,11 @@ def test_stats_endpoint_without_a_database():
     import api
 
     assert TestClient(api.app).get("/stats").status_code == 503
+
+
+@needs_postgres
+def test_the_tools_a_question_used_are_logged(log):
+    with_tools = result()
+    with_tools["tool_calls"] = [{"name": "assess_process", "args": {}, "result": {}}]
+    log_id = log.record(with_tools, source="api")
+    assert log.fetch("SELECT tools FROM query_logs WHERE id = %s", (log_id,))[0]["tools"] == ["assess_process"]

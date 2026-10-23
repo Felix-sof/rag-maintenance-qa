@@ -68,6 +68,7 @@ LABELS = {
     "top_documents": "Belgeler: getirilme ve atıf oranı",
     "hard_questions": "Zor sorular (en zayıf eşleşmeler)",
     "weekly_trend": "Haftalık eğilim",
+    "tool_usage": "Copilot araçları: kullanım ve maliyet",
 }
 for name, frame in results.items():
     with st.expander(LABELS.get(name, name), expanded=name in ("hard_questions", "latency_percentiles")):

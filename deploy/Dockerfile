@@ -53,6 +53,7 @@ COPY *.py ./
 COPY db/ db/
 COPY analytics/ analytics/
 COPY knowledge/ knowledge/
+COPY ai4i/ ai4i/
 RUN useradd --create-home app && chown -R app /app
 USER app
 EXPOSE 8080

@@ -33,12 +33,18 @@ from fastapi import Depends, FastAPI, File, Form, HTTPException, Query, Request,
 from pydantic import BaseModel, Field
 
 import analytics
+import copilot_tools
 import query_log
 import rag
 import retriever
 from generator import MODEL
 from rate_limit import PER_DAY, RateLimiter
 from vector_store import MAX_TOP_K, get_store
+
+
+def copilot_on() -> bool:
+    """COPILOT=1 (the default): /ask may call the failure-rule and dataset tools (copilot_tools.py)."""
+    return os.environ.get("COPILOT", "1") == "1"
 
 
 def read_only() -> bool:
@@ -162,7 +168,12 @@ def search(
 
 @app.post("/ask", dependencies=[Depends(rate_limited)])
 def ask(req: AskRequest) -> dict:
-    result = rag.answer(req.question, history=[t.model_dump() for t in req.history], top_k=req.top_k)
+    result = rag.answer(
+        req.question,
+        history=[t.model_dump() for t in req.history],
+        top_k=req.top_k,
+        tools=copilot_tools if copilot_on() else None,
+    )
     query_log.record(result, source="api")
     return result
 

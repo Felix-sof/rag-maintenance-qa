@@ -134,15 +134,14 @@ def test_uploads_are_indexed_and_deleted(make_store):
 
 
 def test_migrations_run_once(make_store):
-    from db.migrate import migrate
+    from db.migrate import MIGRATIONS_DIR, migrate
 
     store = make_store()
     store.build()
     assert migrate(store._connection()) == []
-    assert _sql(store, "SELECT version FROM schema_migrations ORDER BY version") == [
-        ("001_pgvector_index",),
-        ("002_query_logs",),
-    ]
+    every_file = sorted(path.stem for path in MIGRATIONS_DIR.glob("*.sql"))
+    assert [row[0] for row in _sql(store, "SELECT version FROM schema_migrations ORDER BY version")] == every_file
+    assert every_file[:3] == ["001_pgvector_index", "002_query_logs", "003_ai4i_processes"]
 
 
 def test_a_read_only_instance_reads_the_index_but_never_rebuilds_it(make_store, monkeypatch):

@@ -8,6 +8,7 @@ from datetime import date
 
 import streamlit as st
 
+import copilot_tools
 import query_log
 import rag
 from chunking import META_SUFFIX
@@ -100,6 +101,53 @@ def render_unsupported_numbers(result: dict) -> None:
         )
 
 
+MODE_NAMES = {"HDF": "Isı dağıtım", "PWF": "Güç", "OSF": "Aşırı zorlanma", "TWF": "Takım aşınması", "RNF": "Rastgele"}
+
+
+def render_assessment(n: int, assessment: dict) -> None:
+    if "error" in assessment:
+        st.error(f"[T{n}] Değerlendirme yapılamadı: {assessment['error']}")
+        return
+    verdict = ", ".join(assessment["triggered"]) or "kural tabanlı arıza yok"
+    st.markdown(f"**[T{n}] Proses değerlendirmesi** — {verdict}")
+    rows = []
+    for mode, info in assessment["modes"].items():
+        if info["triggered"] is None:  # TWF / RNF: a rate, not a verdict
+            rate = info.get("dataset_rate", info.get("probability"))
+            rows.append({"Mod": f"{mode} ({MODE_NAMES[mode]})", "Durum": f"oran %{rate * 100:.1f}", "Koşullar": "rastgele"})
+            continue
+        conditions = "; ".join(
+            f"{c['condition']}: {c['value']} ({'sağlandı' if c['met'] else 'sağlanmadı'}, pay {c['margin']})"
+            for c in info["conditions"]
+        )
+        rows.append({"Mod": f"{mode} ({MODE_NAMES[mode]})", "Durum": "⚠️ tetiklendi" if info["triggered"] else "yok", "Koşullar": conditions})
+    st.dataframe(rows, hide_index=True, width="stretch")
+    similar = assessment.get("similar_recorded_processes")
+    if similar:
+        modes = ", ".join(f"{m} {c}" for m, c in similar["failed_by_mode"].items() if c)
+        st.caption(
+            f"Veri setinde en benzer {similar['compared']} prosesin {similar['failed']} tanesi arızayla bitti"
+            + (f" ({modes})" if modes else "") + ". AI4I sentetik bir veri setidir."
+        )
+    if assessment["outside_data_range"]:
+        st.caption("Veri setinin aralığı dışındaki değerler: " + ", ".join(assessment["outside_data_range"]))
+
+
+def render_tool_calls(result: dict) -> None:
+    calls = result.get("tool_calls") or []
+    if not calls:
+        return
+    with st.expander(f"🔧 Araç çağrıları ({len(calls)})", expanded=True):
+        for n, call in enumerate(calls, start=1):
+            if call["name"] == "assess_process":
+                render_assessment(n, call["result"])
+            elif "error" in call["result"]:
+                st.error(f"[T{n}] {call['name']}: {call['result']['error']}")
+            else:
+                st.markdown(f"**[T{n}] Veri seti sorgusu:** `{call['result'].get('query')}`")
+                st.dataframe(call["result"].get("rows", []), hide_index=True, width="stretch")
+
+
 def render_sources(result: dict) -> None:
     sources = result["sources"]
     if not sources:
@@ -130,16 +178,19 @@ for turn in st.session_state.turns:
             st.warning("Kaynaklar bu konuda birbiriyle çelişiyor.")
         st.markdown(turn["answer"])
         render_unsupported_numbers(turn["result"])
+        render_tool_calls(turn["result"])
         render_sources(turn["result"])
 
-question = st.chat_input("Örn: HDF arızası hangi koşullarda oluşur? / Takım değişimi nasıl yapılır?")
+question = st.chat_input(
+    "Örn: HDF arızası hangi koşullarda oluşur? / L tipi, 300 K, 308.4 K, 1300 rpm, 45 Nm, 120 dk: risk var mı?"
+)
 if question:
     with st.chat_message("user"):
         st.markdown(question)
     with st.chat_message("assistant"):
         with st.spinner("Belgeler aranıyor..."):
             history = [{"question": t["question"], "answer": t["answer"]} for t in st.session_state.turns]
-            result = rag.answer(question, history=history, top_k=top_k)
+            result = rag.answer(question, history=history, top_k=top_k, tools=copilot_tools)
             query_log.record(result, source="ui")
         if result["error"]:
             st.error(result["answer"])
@@ -148,6 +199,7 @@ if question:
                 st.warning("Kaynaklar bu konuda birbiriyle çelişiyor. Cevaptaki iki versiyonu ve hangisinin neden geçerli sayıldığını kontrol edin.")
             st.markdown(result["answer"])
             render_unsupported_numbers(result)
+            render_tool_calls(result)
         render_sources(result)
 
     if not result["error"]:  # a failed turn would only confuse the next follow-up

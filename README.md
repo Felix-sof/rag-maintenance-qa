@@ -33,6 +33,11 @@ locally on CPU; generation uses the Google Gemini free tier.
 - **ChromaDB or PostgreSQL + pgvector**: the index runs locally in ChromaDB or in
   Postgres (HNSW vector index, full-text search, SQL migrations), with
   identical retrieval scores on both.
+- **A maintenance copilot**: through Gemini function calling, the model can
+  apply the documented failure rules to the readings in a question, query the
+  10,000 recorded processes with fixed SQL, and find the most similar past
+  processes with pgvector. Tool results are cited as `[T1]` and checked like
+  passages.
 - **SQL analytics**: every question is logged to Postgres. Six commented SQL
   queries (percentiles, window functions, `ROLLUP`) report volume, refusal
   rate, latency, the most used documents and the hardest questions, through
@@ -52,7 +57,7 @@ locally on CPU; generation uses the Google Gemini free tier.
   question before retrieval.
 - **Measured, not assumed**: a retrieval eval and an off-topic gate eval, both
   with a CI quality gate, an end-to-end answer eval against the live LLM, and
-  171 unit tests.
+  197 unit tests.
 
 ## Architecture
 
@@ -88,6 +93,7 @@ locally on CPU; generation uses the Google Gemini free tier.
 | `app.py` | Streamlit chat UI: cited answers, conflict and unsupported-number warnings, source inspector (which retriever found each chunk and its rerank score), document upload and delete. |
 | `api.py` | FastAPI: `/ask`, `/search` (with `?mode=` to compare retrievers), `/documents` (GET/POST/DELETE), `/stats`, `/health`. |
 | `failure_rules.py` | The documented failure rules as code: assesses one process, with margins to every threshold. Tested against all 10,000 rows of the AI4I dataset. |
+| `copilot_tools.py` · `process_data.py` | The copilot's tools: the failure rules on given readings, the AI4I data in Postgres behind fixed SQL queries, and a pgvector search for similar recorded processes. |
 | `rate_limit.py` | Per-client and global daily limits on `/ask`, the endpoint that calls Gemini. |
 | `deploy/Dockerfile` | The cloud image: API only, multi-stage, models baked in, read-only, models loaded before traffic. |
 | `query_log.py` · `analytics/` | Every question logged to Postgres, and the SQL that reads the log: volume, refusal rate, latency percentiles, top documents, hard questions, weekly trend. |
@@ -285,6 +291,7 @@ measures:
 | `04_top_documents.sql` | documents retrieved most, and how often they're then cited | join of hits to logs, `cite_rate` |
 | `05_hard_questions.sql` | the weakest matches, LLM refusals, unsupported numbers | `percent_rank()`, `DISTINCT ON` |
 | `06_weekly_trend.sql` | week-over-week change, 4-week moving average, running total | `generate_series` to fill empty weeks, `lag()`, window frames |
+| `07_tool_usage.sql` | which copilot tools questions used, at what latency and token cost | `unnest()` of an array column in a `LATERAL` join |
 
 `tests/test_query_log.py` seeds rows whose statistics can be worked out by hand
 and checks each query's output. For example, latencies of 100, 300 and 500 ms
@@ -334,6 +341,58 @@ stratified cross-validation, so no row is predicted by a model that saw it.
 - **The rules are the right tool for this data.** It is synthetic and was
   generated from these rules. A model can only approximate them, while the
   rules also explain each verdict in the documents' own terms.
+
+### The maintenance copilot: retrieval, rules and data in one answer
+
+A question can be answered from the documents, from the rules applied to
+specific readings, or from the recorded data. `/ask` and the chat UI give the
+model two tools (`copilot_tools.py`) through Gemini function calling:
+
+| Tool | What it does |
+|---|---|
+| `assess_process` | Runs `failure_rules.assess()` on the readings in the question: which modes trigger, and the margin to every threshold. Then a pgvector search finds the 25 most similar recorded processes of the same product type and reports how many failed, and how. |
+| `query_dataset` | Runs one of three fixed SQL queries over the 10,000 recorded processes in Postgres: failure rate by product type, failure rate by tool-wear band (`width_bucket`), and average readings per failure mode (an unpivot with `LATERAL (VALUES ...)`). |
+
+*"L tipi, hava 300 K, proses 308.4 K, 1300 rpm, 45 Nm, 120 dk: risk var mı?"*
+calls `assess_process`. The answer then cites the tool's result as `[T1]` and
+the passage that states the HDF rule as `[n]`. The chat UI shows the
+assessment as a table, with the margin to each threshold.
+
+Design choices:
+
+- **The model never writes SQL.** It picks a named query and a product type
+  from an enum; the SQL is fixed in code and the driver binds the parameters.
+  Behind a public endpoint, LLM-written SQL would be one prompt injection away
+  from reading or changing data. A test sends `DROP TABLE` and an injection
+  attempt and checks both are refused.
+- **At most two LLM calls per question.** The first may call tools, up to
+  three in parallel. The second has tools switched off
+  (`function_calling_config: NONE`), so it must answer. A question that needs
+  no tool costs one call, as before. That matters on a free tier of about 20
+  requests a day.
+- **Tool results are sources.** The number check (`grounding.py`) accepts a
+  number found in a tool result as well as in a cited passage. A figure the
+  model computed itself is still flagged.
+- **Readings get past the off-topic gate.** A question with two or more
+  sensor values ("300 K", "1300 rpm") skips the score gate, because no passage
+  matches bare numbers well while the tools can answer them.
+- **A bad tool call is the model's to explain, not a crash.** Missing readings,
+  an unknown tool or an unreachable database come back as `{"error": ...}`.
+- **"Similar" is measured in the documents' quantities.** The search compares
+  temperature difference, speed, power, wear x torque and wear, each scaled
+  to unit variance, rather than the raw readings. The eval checks how often a
+  failed process's 25 nearest neighbours failed in the same mode:
+
+  | Distance on | HDF | PWF | OSF | TWF |
+  |---|---|---|---|---|
+  | base rate (any process) | 0.011 | 0.009 | 0.010 | 0.005 |
+  | raw readings | 0.220 | 0.204 | 0.337 | 0.022 |
+  | **the documents' quantities** | **0.261** | **0.241** | **0.562** | 0.018 |
+
+  TWF stays near chance either way, as it should: it is random by construction.
+
+Every tool call is logged (`query_logs.tools`), and `analytics/07_tool_usage.sql`
+reports tool use with its latency and token cost.
 
 ### A public endpoint on a zero budget
 
@@ -463,6 +522,8 @@ curl -X POST http://localhost:8000/ask -H "Content-Type: application/json" \
 - `unsupported_numbers`: numbers in the answer that none of its cited sources
   contain (empty when everything checks out)
 - `search_query`: the condensed question
+- `tool_calls`: the copilot tools the model called, with their arguments and results, and
+  `cited_tools`: the `[Tn]` the answer cites
 - `outcome`: `answered`, `refused_gate`, `refused_llm` or `error`
 - `timings` (total, retrieval and LLM ms) and `usage` (LLM calls and tokens)
 
@@ -473,6 +534,7 @@ pip install pgserver                        # Postgres 16 + pgvector, no Docker 
 python -m db.local_postgres                 # starts it, prints DATABASE_URL for .env
 # in .env: VECTOR_BACKEND=pgvector and DATABASE_URL=...
 python vector_store.py --rebuild            # migrates the schema, indexes knowledge/
+python -m process_data                      # loads the AI4I dataset for the copilot's tools
 python -m evals.retrieval_eval --compare-backends
 ```
 
@@ -494,6 +556,7 @@ first connection, or explicitly with `python -m db.migrate`.
 | `DATABASE_URL` | | Postgres connection string, for `pgvector` |
 | `KEYWORD_BACKEND` | `bm25` | `bm25`, or with `pgvector` also `pg_fts_stems` / `pg_fts_turkish` |
 | `QUERY_LOG` | `on` | Questions are logged to `DATABASE_URL` when it is set; `off` turns that off. |
+| `COPILOT` | `1` | `0` answers from the documents only, without the tools |
 | `READ_ONLY` | `0` | `1` in a public deployment: uploads and deletes are refused, and the pgvector index is served as built, never rebuilt by a serving instance. |
 | `WARM_UP` | `0` | `1` loads the models at startup, before the API accepts requests. |
 | `RATE_LIMIT_PER_MINUTE` | `5` | `/ask` requests per client per minute |
@@ -503,7 +566,7 @@ first connection, or explicitly with `python -m db.migrate`.
 
 ```bash
 pip install -r requirements-dev.txt
-pytest                                       # 171 tests, ~20 s, offline (29 need TEST_DATABASE_URL)
+pytest                                       # 197 tests, ~25 s, offline (41 need TEST_DATABASE_URL)
 python -m evals.retrieval_eval               # retriever comparison (offline, free)
 python -m evals.retrieval_eval --mode hybrid_rerank   # per-question detail
 python -m evals.gate_eval                    # off-topic gate comparison (offline, free)
@@ -589,9 +652,11 @@ right section was never retrieved, or the model didn't use it.
 ├── analytics/              the analytics SQL, the report and the replay
 ├── pages/analytics.py      Streamlit analytics page
 ├── failure_rules.py        the failure rules as code, checked against the dataset
+├── copilot_tools.py        the copilot's tools (rules, dataset queries, similar processes)
+├── process_data.py         the AI4I data in Postgres: fixed SQL queries, nearest neighbours
 ├── ai4i/                   the AI4I 2020 dataset (CC BY 4.0)
 ├── evals/                  retrieval, gate, answer and failure-model evals, results/
-├── tests/                  171 tests
+├── tests/                  197 tests
 ├── Dockerfile · docker-compose.yml   local images (UI + API)
 ├── deploy/Dockerfile       the cloud image (API only)
 └── .github/workflows/ci.yml

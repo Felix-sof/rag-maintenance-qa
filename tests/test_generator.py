@@ -10,6 +10,7 @@ from generator import GeminiGenerator, GenerationError
 
 class FakeResponse:
     text = " cevap "
+    function_calls = None
 
 
 def api_error(code):
@@ -22,9 +23,11 @@ def script(monkeypatch):
     monkeypatch.setenv("GEMINI_API_KEY", "test-key")
     outcomes = []
     clients = []
+    requests = []  # the keyword arguments of every generate_content call
 
     class FakeModels:
         def generate_content(self, **kwargs):
+            requests.append(kwargs)
             outcome = outcomes.pop(0)
             if isinstance(outcome, Exception):
                 raise outcome
@@ -32,6 +35,7 @@ def script(monkeypatch):
 
     class FakeClient:
         models = FakeModels()
+        sent = requests  # shared by every client: what was sent, in order
 
     def new_client():
         clients.append(FakeClient())
@@ -107,7 +111,7 @@ def test_token_usage_is_added_to_the_callers_counter(script):
     usage = {}
     GeminiGenerator().generate("sys", "prompt", usage=usage)
     GeminiGenerator().generate("sys", "prompt", usage=usage)
-    assert usage == {"prompt_tokens": 240, "output_tokens": 90}  # thought tokens count as output
+    assert usage == {"llm_calls": 2, "prompt_tokens": 240, "output_tokens": 90}  # thought tokens count as output
 
 
 def test_a_missing_api_key_is_a_generation_error_not_a_crash(monkeypatch):
@@ -115,3 +119,30 @@ def test_a_missing_api_key_is_a_generation_error_not_a_crash(monkeypatch):
     monkeypatch.delenv("GOOGLE_API_KEY", raising=False)
     with pytest.raises(GenerationError, match="GEMINI_API_KEY"):
         GeminiGenerator().generate("sys", "prompt")
+
+
+def test_tool_calls_are_run_and_the_model_then_has_to_answer(script):
+    from google.genai import types
+
+    class AsksForATool:
+        text = None
+        function_calls = [types.FunctionCall(name="assess_process", args={"torque_nm": 45})]
+        candidates = [types.Candidate(content=types.Content(role="model", parts=[types.Part(text="calling")]))]
+
+    outcomes, clients = script
+    outcomes += [AsksForATool(), FakeResponse()]
+    ran = []
+    tools = [{"name": "assess_process", "description": "d", "parameters": {"type": "object", "properties": {}}}]
+    answer, calls = GeminiGenerator().generate_with_tools(
+        "sys", "prompt", tools, lambda name, args: ran.append((name, args)) or {"ok": True}
+    )
+
+    assert answer == "cevap"
+    assert ran == [("assess_process", {"torque_nm": 45})]
+    assert calls == [{"name": "assess_process", "args": {"torque_nm": 45}, "result": {"ok": True}}]
+    first, second = clients[0].sent
+    assert first["config"].tool_config is None  # tools on
+    assert second["config"].tool_config.function_calling_config.mode == "NONE"  # the last round must answer
+    # the second request carries the question, the model's tool request and the tool's result
+    assert [c.role for c in second["contents"]] == ["user", "model", "user"]
+    assert second["contents"][2].parts[0].function_response.response == {"result": {"ok": True}}
