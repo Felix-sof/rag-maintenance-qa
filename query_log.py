@@ -30,11 +30,11 @@ INSERT_LOG = """
     INSERT INTO query_logs (
         source, question, search_query, outcome, conflict, unsupported_numbers,
         top_cosine, top_rerank, latency_ms, retrieval_ms, llm_ms, llm_calls,
-        prompt_tokens, output_tokens, model, retrieval_mode
+        prompt_tokens, output_tokens, model, retrieval_mode, tools
     ) VALUES (
         %(source)s, %(question)s, %(search_query)s, %(outcome)s, %(conflict)s, %(unsupported_numbers)s,
         %(top_cosine)s, %(top_rerank)s, %(latency_ms)s, %(retrieval_ms)s, %(llm_ms)s, %(llm_calls)s,
-        %(prompt_tokens)s, %(output_tokens)s, %(model)s, %(retrieval_mode)s
+        %(prompt_tokens)s, %(output_tokens)s, %(model)s, %(retrieval_mode)s, %(tools)s
     )
     RETURNING id
 """
@@ -83,6 +83,7 @@ class QueryLog:
             "output_tokens": usage.get("output_tokens") if called_llm else None,
             "model": result.get("model"),
             "retrieval_mode": result.get("retrieval_mode"),
+            "tools": [call["name"] for call in result.get("tool_calls", [])],
         }
         cited = set(result.get("cited", []))
         hits = [

@@ -108,6 +108,7 @@ jobs:
         run: |
           DB=postgresql://postgres:postgres@localhost:5432/postgres
           docker run --rm --network host -e DATABASE_URL=$DB -e READ_ONLY=0 rag-api python vector_store.py --rebuild
+          docker run --rm --network host -e DATABASE_URL=$DB -e READ_ONLY=0 rag-api python -m process_data
           start=$(date +%s)
           docker run -d --name api --network host -e DATABASE_URL=$DB -e PORT=8080 rag-api
           for i in $(seq 1 90); do curl -sf localhost:8080/health > /dev/null && break; sleep 1; done

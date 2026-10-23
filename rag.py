@@ -20,6 +20,7 @@ The RAG pipeline: question -> retrieve -> augment -> generate -> cited answer.
     python rag.py "HDF arızası nasıl önlenir?"
 """
 
+import json
 import re
 import sys
 import time
@@ -82,6 +83,29 @@ Rules:
   procedures.
 """
 
+TOOL_RULES = f"""
+Tools - you can also call tools:
+- assess_process applies the documented failure rules to readings the user gives, and
+  compares them with the most similar recorded processes. query_dataset answers questions
+  about the recorded AI4I processes. Call a tool when the question needs one; answer from
+  the passages alone when it doesn't.
+- Your tool results are numbered in the order you receive them: [T1], [T2], ... Cite them
+  like passages, e.g. "HDF koşulu sağlanıyor [T1].", and cite the passage that states the
+  rule too.
+- Report a tool's numbers as it gives them (values, thresholds, margins, rates). Don't
+  compute new ones.
+- A TWF or RNF rate is the share of recorded processes that failed, not a prediction for
+  this one: say so. Dataset figures come from a synthetic dataset: say that once.
+- If a tool returns an error, say what is missing or wrong instead of guessing. If the
+  readings are outside the dataset's range (outside_data_range), say the assessment
+  extrapolates.
+- Reply "{NO_ANSWER}" only if neither the passages nor a tool answers the question.
+"""
+
+# Two or more numbers with a sensor unit ("300 K", "1300 rpm", "45 Nm", "215 dk"): the
+# question is about specific readings, which the tools answer even when no passage matches it.
+READINGS_PATTERN = re.compile(r"\d+(?:[.,]\d+)?\s*(?:K|°C|rpm|Nm|dk|dak|min)\b", re.IGNORECASE)
+
 CONDENSE_PROMPT = """Rewrite the follow-up question so it can be understood without the
 conversation, keeping its language. Resolve pronouns and references ("peki onun
 adımları?", "bunu nasıl önleriz?") using the conversation. If it is already
@@ -116,6 +140,15 @@ def extract_citations(answer: str, n_sources: int) -> list[int]:
     return sorted(cited)
 
 
+def extract_tool_citations(answer: str, n_calls: int) -> list[int]:
+    """Tool results the answer cites as [T1], [T2], ..., ignoring any outside 1..n_calls."""
+    return sorted({int(n) for n in re.findall(r"\[T(\d+)\]", answer) if 1 <= int(n) <= n_calls})
+
+
+def gives_readings(question: str) -> bool:
+    return len(READINGS_PATTERN.findall(question)) >= 2
+
+
 def is_off_topic(hits: list[dict]) -> bool:
     """True if even the best hit is too weak a match to be worth an LLM call."""
     if not hits:
@@ -142,7 +175,7 @@ def _ms_since(start: float) -> int:
 
 
 class _MeteredGenerator:
-    """Wraps the generator to count LLM calls, tokens and time for the query log."""
+    """Wraps the generator to time its calls; it counts calls and tokens into result["usage"] itself."""
 
     def __init__(self, generator, result: dict):
         self.generator = generator
@@ -153,11 +186,20 @@ class _MeteredGenerator:
         try:
             return self.generator.generate(system, prompt, temperature, usage=self.result["usage"])
         finally:
-            self.result["usage"]["llm_calls"] += 1
+            self.result["timings"]["llm_ms"] += _ms_since(start)
+
+    def generate_with_tools(self, system: str, prompt: str, tools, call_tool) -> tuple[str, list[dict]]:
+        """Tool time is LLM time here too: it is part of the same exchange with the model."""
+        start = time.perf_counter()
+        try:
+            return self.generator.generate_with_tools(system, prompt, tools, call_tool, usage=self.result["usage"])
+        finally:
             self.result["timings"]["llm_ms"] += _ms_since(start)
 
 
-def answer(question: str, history: list[dict] = None, top_k: int = DEFAULT_TOP_K, retriever=None, generator=None) -> dict:
+def answer(
+    question: str, history: list[dict] = None, top_k: int = DEFAULT_TOP_K, retriever=None, generator=None, tools=None
+) -> dict:
     """Answer a question from the knowledge base.
 
     `history` is a list of previous {"question", "answer"} turns (oldest
@@ -172,6 +214,12 @@ def answer(question: str, history: list[dict] = None, top_k: int = DEFAULT_TOP_K
     query log: "outcome" (answered / refused_gate / refused_llm / error),
     "timings" (total, retrieval and LLM milliseconds), "usage" (LLM calls
     and tokens), "model" and "retrieval_mode".
+
+    With `tools` (a module or object with TOOLS and call(), such as
+    copilot_tools), the model may call them before answering: "tool_calls"
+    lists each call with its result, and "cited_tools" the [Tn] the answer
+    cites. A question that gives sensor readings skips the off-topic gate,
+    since the tools can answer it even when no passage matches.
     """
     started = time.perf_counter()
     retriever = retriever or get_retriever()
@@ -182,6 +230,8 @@ def answer(question: str, history: list[dict] = None, top_k: int = DEFAULT_TOP_K
         "answer": "",
         "sources": [],
         "cited": [],
+        "tool_calls": [],
+        "cited_tools": [],
         "conflict": False,
         "unsupported_numbers": [],
         "error": False,
@@ -201,20 +251,28 @@ def answer(question: str, history: list[dict] = None, top_k: int = DEFAULT_TOP_K
         hits = retriever.search(search_query, top_k=top_k)
         result["timings"]["retrieval_ms"] = _ms_since(retrieval_started)
         result["sources"] = [{"n": n, **hit} for n, hit in enumerate(hits, start=1)]
-        if is_off_topic(hits):
+        if is_off_topic(hits) and not (tools and gives_readings(search_query)):
             result["answer"] = NO_ANSWER
             result["outcome"] = "refused_gate"
             return result
 
         prompt = f"Context:\n\n{format_context(hits)}\n\nQuestion: {search_query}"
-        result["answer"] = generator.generate(SYSTEM_PROMPT, prompt)
+        if tools:
+            result["answer"], result["tool_calls"] = generator.generate_with_tools(
+                SYSTEM_PROMPT + TOOL_RULES, prompt, tools.TOOLS, tools.call
+            )
+        else:
+            result["answer"] = generator.generate(SYSTEM_PROMPT, prompt)
         result["outcome"] = "refused_llm" if NO_ANSWER in result["answer"] else "answered"
 
         result["cited"] = extract_citations(result["answer"], len(hits))
+        result["cited_tools"] = extract_tool_citations(result["answer"], len(result["tool_calls"]))
         result["conflict"] = CONFLICT_MARKER in result["answer"]
         result["unsupported_numbers"] = unsupported_numbers(
             result["answer"],
-            [format_passage(hits[n - 1]) for n in result["cited"]],
+            # a tool result counts as a source whether or not the answer cites it: the model saw it
+            [format_passage(hits[n - 1]) for n in result["cited"]]
+            + [json.dumps(call["result"], ensure_ascii=False) for call in result["tool_calls"]],
             question=f"{question} {search_query}",
         )
         return result

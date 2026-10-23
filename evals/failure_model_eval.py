@@ -19,6 +19,11 @@ of rows, so accuracy says little (always predicting "no failure" scores
 No method can catch every failure: TWF strikes at a random tool wear and
 RNF at random, and 9 failures carry no mode at all. The last line says how
 many failures a perfect predictor of the deterministic modes would find.
+
+It also checks the space the copilot's "similar recorded processes" search
+uses (process_data.py): for each failed process, how many of its 25 nearest
+neighbours of the same product type failed in the same mode, when distance is
+measured on the raw readings and on the documents' quantities.
 """
 
 import math
@@ -79,7 +84,27 @@ def evaluate() -> dict:
 
     deterministic = sum(1 for r in records if r["machine_failure"] and (r["hdf"] or r["pwf"] or r["osf"]))
     results["ceiling"] = {"deterministic_failures": deterministic, "failures": int(y.sum())}
+    results["neighbours"] = {space: neighbour_agreement(records, space) for space in ("raw readings", "doc quantities")}
     return results
+
+
+def neighbour_agreement(records: list[dict], space: str, k: int = 25) -> dict:
+    """Per mode: the share of a failed process's k nearest same-type neighbours that failed in that mode."""
+    if space == "raw readings":
+        x = np.array([[r[key] for key in RAW[1:]] for r in records], dtype=float)
+    else:  # the quantities process_data.py's search uses
+        x = np.array([features(r, with_doc_features=True)[6:9] + [r["rotational_speed_rpm"], r["tool_wear_min"]] for r in records])
+    x = (x - x.mean(axis=0)) / x.std(axis=0)
+    types = np.array([r["product_type"] for r in records])
+    agreement = {}
+    for mode in ("hdf", "pwf", "osf", "twf"):
+        shares = []
+        for i in (i for i, r in enumerate(records) if r[mode]):
+            same_type = np.flatnonzero(types == types[i])
+            nearest = same_type[np.argsort(np.linalg.norm(x[same_type] - x[i], axis=1))][1 : k + 1]  # not itself
+            shares.append(np.mean([records[j][mode] for j in nearest]))
+        agreement[mode.upper()] = float(np.mean(shares))
+    return agreement
 
 
 if __name__ == "__main__":
@@ -95,3 +120,8 @@ if __name__ == "__main__":
         f"\n{ceiling['deterministic_failures']} of {ceiling['failures']} failures have a deterministic mode (HDF, PWF or OSF): "
         f"recall {ceiling['deterministic_failures'] / ceiling['failures']:.3f} is the most any method can reach without luck."
     )
+    records = load_dataset()
+    base = {mode.upper(): sum(r[mode] for r in records) / len(records) for mode in ("hdf", "pwf", "osf", "twf")}
+    print("\nShare of a failed process's 25 nearest neighbours that failed in the same mode (base rate in brackets):")
+    for space, agreement in results["neighbours"].items():
+        print(f"  {space:15s} " + "  ".join(f"{m} {share:.3f} ({base[m]:.3f})" for m, share in agreement.items()))
