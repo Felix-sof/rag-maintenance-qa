@@ -1,3 +1,6 @@
 * text=auto eol=lf
 *.pdf binary
 *.png binary
+
+# the dataset is kept byte-for-byte as published (its SHA-256 is in ai4i/README.md)
+ai4i/*.csv -text
