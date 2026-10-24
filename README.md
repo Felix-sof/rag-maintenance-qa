@@ -358,6 +358,22 @@ calls `assess_process`. The answer then cites the tool's result as `[T1]` and
 the passage that states the HDF rule as `[n]`. The chat UI shows the
 assessment as a table, with the margin to each threshold.
 
+A real exchange, from 2026-10-24 (gemini-3.5-flash, abridged):
+
+> **Q:** M tipi ürün: hava 298 K, proses 308 K, 1500 rpm, 65 Nm, takım aşınması 210 dk. Hangi arızalar bekleniyor?
+>
+> *assess_process → triggered: PWF, OSF · 12 of the 25 most similar recorded processes failed (OSF 9, PWF 6, TWF 2)*
+>
+> Verilen proses değerleri için **OSF (Aşırı Zorlanma Arızası)** ve **PWF (Güç Arızası)** beklenmektedir [T1].
+> 1. **OSF:** Takım aşınması ile torkun çarpımı 13.650 minNm olup, M tipi ürün için belirlenen 12.000 minNm sınırını aşmaktadır [T1], [2].
+> 2. **PWF:** Hesaplanan güç değeri 10.210 W olup, 9.000 W üst sınırını aşmaktadır [T1].
+>
+> - **TWF:** Takım aşınması (210 dk), 200–240 dk arasındaki olası arıza penceresindedir [T1].
+> - **HDF:** Tetiklenmemiştir (sıcaklık farkı 10 K, 8,6 K sınırının üzerindedir; devir sayısı 1500 rpm, 1380 rpm sınırının üzerindedir) [T1].
+
+Every number in it is in the tool result or a cited passage: the number check
+found nothing unsupported.
+
 Design choices:
 
 - **The model never writes SQL.** It picks a named query and a product type
@@ -548,7 +564,10 @@ first connection, or explicitly with `python -m db.migrate`.
 | Variable | Default | |
 |---|---|---|
 | `GEMINI_API_KEY` | (required) | |
-| `GEMINI_MODEL` | `gemini-3.8-flash` | The free tier currently allows only ~20 requests/day for this model. Another model, e.g. `gemini-3.5-flash`, has its own quota. |
+| `GEMINI_MODEL` | `gemini-3.5-flash` | The free tier allows only ~20 requests/day per model. |
+| `GEMINI_FALLBACK_MODEL` | `gemini-3.8-flash` | Answers when the main model is overloaded, stalls or is out of quota; it has a quota of its own. Empty turns the fallback off. |
+| `GEMINI_TIMEOUT_SECONDS` | `60` | A request with no answer after this is abandoned (and retried once, or handed to the fallback). |
+| `GEMINI_IPV4` | `1` | Connect to Gemini over IPv4; `0` lets the system choose. |
 | `RETRIEVAL_MODE` | `hybrid_rerank` | `vector`, `bm25`, `hybrid` or `hybrid_rerank` |
 | `EMBED_MODEL` | `intfloat/multilingual-e5-small` | Changing it rebuilds the index automatically. Re-measure `MIN_SCORE` afterwards. |
 | `RERANK_MODEL` | `cross-encoder/mmarco-mMiniLMv2-L12-H384-v1` | `MIN_RERANK_SCORE` is on this model's score scale. Re-measure it with `python -m evals.gate_eval` if you change the model. |
@@ -626,13 +645,22 @@ right section was never retrieved, or the model didn't use it.
 
 ## Troubleshooting
 
-- **`SSL: INVALID_SESSION_ID` / slow answers on Windows.** Antivirus HTTPS
-  inspection, a VPN or an unstable connection can drop TLS connections at
-  random; on the development machine `curl` failed the same way. `generator.py`
-  retries up to 12 times on fresh connections, so an answer can take up to
-  about a minute.
-- **"Gemini quota exhausted … resets in about N h".** The free-tier daily quota
-  is used up. Wait for the reset, or set `GEMINI_MODEL` to another model.
+- **`SSL: INVALID_SESSION_ID` on Windows.** On the development machine, TLS
+  to the Gemini API over IPv6 failed on 3 of 3 large requests, and over IPv4
+  on none. The cause is probably antivirus HTTPS inspection or a VPN. The
+  client therefore connects over IPv4 (`GEMINI_IPV4`), and still retries a
+  dropped connection on a fresh one.
+- **A request that never returns.** Seen once: a connection stalled, and a
+  request without a timeout waited more than 10 minutes. Every request now
+  times out after `GEMINI_TIMEOUT_SECONDS` and is retried once, or handed to the
+  fallback model.
+- **503 "high demand" or 504 "deadline expired".** The model is overloaded.
+  The main model hands the request to the fallback at the first such error,
+  without retrying, because retries cost about 2 minutes before the fallback
+  answered in seconds. The fallback model does get the retries.
+- **"Gemini quota exhausted … resets in about N h".** The daily free-tier
+  quota of one model is used up, and the fallback model takes over. If both
+  are used up, wait for the reset.
 
 ## Project structure
 

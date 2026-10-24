@@ -283,6 +283,7 @@ def answer(
         return result
     finally:
         result["timings"]["total_ms"] = _ms_since(started)
+        result["model"] = result["usage"].pop("model", None) or result["model"]  # the fallback, if it answered
 
 
 if __name__ == "__main__":

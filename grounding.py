@@ -15,6 +15,7 @@ comparison is by value, not by spelling:
     8,6  == 8.6                              decimal comma or point
     13.000 == 13,000 == 13 000 == 13000      thousands grouping
     "beş arıza modu" supports "5"            number words up to ten
+    %20 == 20% == 0.2                        a percentage and the fraction it stands for
 
 The check leans towards silence. A token that could be read two ways
 ("1.250" is 1250 in Turkish and 1.25 in English) counts if either reading
@@ -67,11 +68,20 @@ def _values(token: str) -> tuple[set[Decimal], set[Decimal]]:
     return whole, pieces
 
 
+def _tokens(text: str):
+    """Each number token in `text`, with its values; a percentage ("%20", "20 %") also as a fraction (0.2)."""
+    for match in NUMBER_PATTERN.finditer(text):
+        whole, pieces = _values(match.group())
+        before, after = text[: match.start()].rstrip(" "), text[match.end() :].lstrip(" ")
+        if before.endswith("%") or after.startswith("%"):
+            whole = whole | {value / 100 for value in whole}
+        yield match.group(), whole, pieces
+
+
 def _known_values(texts: list[str]) -> set[Decimal]:
     known = set()
     for text in texts:
-        for token in NUMBER_PATTERN.findall(text):
-            whole, pieces = _values(token)
+        for _, whole, pieces in _tokens(text):
             known |= whole | pieces
         known.update(Decimal(NUMBER_WORDS[w]) for w in re.findall(r"\w+", turkish_lower(text)) if w in NUMBER_WORDS)
     return known
@@ -85,8 +95,7 @@ def unsupported_numbers(answer: str, passages: list[str], question: str = "") ->
     known = _known_values([*passages, question])
     stated = LIST_MARKER_PATTERN.sub(" ", CITATION_PATTERN.sub(" ", answer))
     missing = []
-    for token in NUMBER_PATTERN.findall(stated):
-        whole, pieces = _values(token)
+    for token, whole, pieces in _tokens(stated):
         if not (whole & known or (pieces and pieces <= known)) and token not in missing:
             missing.append(token)
     return missing
