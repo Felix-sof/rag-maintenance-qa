@@ -33,6 +33,17 @@ class TestSupported:
     def test_number_words_support_digits(self):
         assert unsupported_numbers("Bu 2 koşul birlikte sağlanmalıdır [1].", [HDF]) == []
 
+    def test_a_percentage_matches_the_fraction_it_stands_for(self):
+        tool = '{"similar": {"compared": 25, "failed": 5, "failure_rate": 0.2}}'
+        assert unsupported_numbers("25 prosesin 5'i (%20) arızalandı [T1].", [tool]) == []
+        assert unsupported_numbers("Oran 20 % [T1].", [tool]) == []
+        assert unsupported_numbers("Oran %0,1 [1].", ["RNF %0,1 olasılıkla oluşur."]) == []
+        assert unsupported_numbers("Olasılık 0.001 [1].", ["RNF %0,1 olasılıkla oluşur."]) == []
+
+    def test_a_wrong_percentage_is_still_flagged(self):
+        assert unsupported_numbers("Oran %30 [T1].", ['{"failure_rate": 0.2}']) == ["30"]
+        assert unsupported_numbers("20 proses [T1].", ['{"failure_rate": 0.2}']) == ["20"]  # no % sign: not 0.2
+
     def test_digits_inside_identifiers_are_ignored(self):
         assert unsupported_numbers("AI4I veri setinde H2O yoktur [1].", [HDF]) == []
 

@@ -66,11 +66,20 @@ def test_overloaded_model_is_retried(script):
     assert GeminiGenerator().generate("sys", "prompt") == "cevap"
 
 
-def test_gives_up_after_max_api_retries(script):
+def test_gives_up_after_max_rate_limit_retries(script):
     outcomes, _ = script
-    outcomes += [api_error(503)] * generator.MAX_RETRIES
-    with pytest.raises(GenerationError, match="503"):
+    outcomes += [api_error(429)] * generator.MAX_RETRIES
+    with pytest.raises(GenerationError, match="429") as failure:
         GeminiGenerator().generate("sys", "prompt")
+    assert not failure.value.switch_model  # a per-minute limit isn't the model's fault
+
+
+def test_an_overloaded_model_gives_up_after_a_few_tries(script):
+    outcomes, _ = script
+    outcomes += [api_error(503)] * (generator.MAX_OVERLOAD_RETRIES + 1)
+    with pytest.raises(GenerationError, match="503") as failure:
+        GeminiGenerator(fallback=None).generate("sys", "prompt")
+    assert failure.value.switch_model
 
 
 def test_non_retryable_error_fails_immediately(script):
@@ -91,7 +100,7 @@ def test_exhausted_daily_quota_fails_fast_without_waiting(script):
     outcomes, clients = script
     outcomes += [api_error_with(429, "Quota exceeded. Please retry in 6h51m33s."), FakeResponse()]
     with pytest.raises(GenerationError, match="quota exhausted"):
-        GeminiGenerator().generate("sys", "prompt")
+        GeminiGenerator(fallback=None).generate("sys", "prompt")
     assert len(clients) == 1
 
 
@@ -111,7 +120,7 @@ def test_token_usage_is_added_to_the_callers_counter(script):
     usage = {}
     GeminiGenerator().generate("sys", "prompt", usage=usage)
     GeminiGenerator().generate("sys", "prompt", usage=usage)
-    assert usage == {"llm_calls": 2, "prompt_tokens": 240, "output_tokens": 90}  # thought tokens count as output
+    assert usage == {"llm_calls": 2, "model": generator.MODEL, "prompt_tokens": 240, "output_tokens": 90}  # thoughts count
 
 
 def test_a_missing_api_key_is_a_generation_error_not_a_crash(monkeypatch):
@@ -146,3 +155,73 @@ def test_tool_calls_are_run_and_the_model_then_has_to_answer(script):
     # the second request carries the question, the model's tool request and the tool's result
     assert [c.role for c in second["contents"]] == ["user", "model", "user"]
     assert second["contents"][2].parts[0].function_response.response == {"result": {"ok": True}}
+
+
+def test_a_stalled_request_times_out_instead_of_hanging(script):
+    outcomes, clients = script
+    outcomes += [httpx.ReadTimeout("no answer")] * 2
+    with pytest.raises(GenerationError, match="didn't answer"):
+        GeminiGenerator(fallback=None).generate("sys", "prompt")
+    assert len(clients) == 2  # retried once, on a fresh connection
+
+
+def test_one_stall_is_retried(script):
+    outcomes, _ = script
+    outcomes += [httpx.ReadTimeout("no answer"), FakeResponse()]
+    assert GeminiGenerator().generate("sys", "prompt") == "cevap"
+
+
+def test_the_client_has_a_timeout_and_connects_over_ipv4(monkeypatch):
+    monkeypatch.setenv("GEMINI_API_KEY", "test-key")
+    transports = []
+    real = httpx.HTTPTransport
+    monkeypatch.setattr(httpx, "HTTPTransport", lambda **kwargs: transports.append(kwargs) or real(**kwargs))
+    client = generator._new_client()
+    assert client._api_client._http_options.timeout == generator.TIMEOUT_SECONDS * 1000
+    assert transports[0]["local_address"] == "0.0.0.0"
+
+
+class TestFallbackModel:
+    """When the main model is overloaded, stalls or is out of quota, the fallback model answers."""
+
+    def test_overload_switches_to_the_fallback_at_once(self, script):
+        outcomes, clients = script
+        outcomes += [api_error(503), FakeResponse()]
+        usage = {}
+        assert GeminiGenerator("main", fallback="spare").generate("sys", "prompt", usage=usage) == "cevap"
+        assert [r["model"] for r in clients[0].sent] == ["main", "spare"]
+        assert usage["model"] == "spare" and usage["llm_calls"] == 2
+
+    def test_a_stall_switches_too_and_the_fallback_gets_the_retries(self, script):
+        outcomes, clients = script
+        outcomes += [httpx.ReadTimeout("stalled"), api_error(503), FakeResponse()]
+        assert GeminiGenerator("main", fallback="spare").generate("sys", "prompt") == "cevap"
+        assert [r["model"] for r in clients[0].sent] == ["main", "spare", "spare"]
+
+    def test_used_up_quota_switches_at_once(self, script):
+        outcomes, clients = script
+        outcomes += [api_error_with(429, "Quota exceeded. Please retry in 6h51m33s."), FakeResponse()]
+        assert GeminiGenerator("main", fallback="spare").generate("sys", "prompt") == "cevap"
+        assert [r["model"] for r in clients[0].sent] == ["main", "spare"]
+
+    def test_errors_any_model_would_hit_dont_switch(self, script):
+        outcomes, clients = script
+        outcomes += [api_error(400), FakeResponse()]
+        with pytest.raises(GenerationError, match="400"):
+            GeminiGenerator("main", fallback="spare").generate("sys", "prompt")
+        assert [r["model"] for r in clients[0].sent] == ["main"]
+
+    def test_a_tool_conversation_stays_on_the_model_it_started_on(self, script):
+        from google.genai import types
+
+        class AsksForATool:
+            text = None
+            function_calls = [types.FunctionCall(name="t", args={})]
+            candidates = [types.Candidate(content=types.Content(role="model", parts=[types.Part(text="calling")]))]
+
+        outcomes, clients = script
+        outcomes += [api_error(503), AsksForATool(), FakeResponse()]
+        tools = [{"name": "t", "description": "d", "parameters": {"type": "object", "properties": {}}}]
+        GeminiGenerator("main", fallback="spare").generate_with_tools("sys", "p", tools, lambda n, a: {})
+        # the fallback took the first round, so it gets the second: its signed turn goes back to it
+        assert [r["model"] for r in clients[0].sent][-2:] == ["spare", "spare"]
