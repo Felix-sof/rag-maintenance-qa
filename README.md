@@ -2,6 +2,12 @@
 
 [![CI](https://github.com/Felix-sof/rag-maintenance-qa/actions/workflows/ci.yml/badge.svg)](https://github.com/Felix-sof/rag-maintenance-qa/actions/workflows/ci.yml)
 
+![The web front end answering a risk question: the rules flag a heat dissipation failure 0.2 K from its threshold, and the evidence panel shows the cited passages](docs/copilot.png)
+
+*A real answer (gemini-3.5-flash, 13 s). The copilot applied the failure rules to the
+readings, flagged HDF with its margins, compared the process with the 25 most similar
+recorded ones, and cited every claim. The number check found nothing unsupported.*
+
 A retrieval-augmented generation (RAG) assistant for industrial maintenance. It
 answers questions about failure modes, procedures, troubleshooting and safety
 **only from a document knowledge base, citing the source of every fact**.
@@ -57,7 +63,7 @@ locally on CPU; generation uses the Google Gemini free tier.
   question before retrieval.
 - **Measured, not assumed**: a retrieval eval and an off-topic gate eval, both
   with a CI quality gate, an end-to-end answer eval against the live LLM, and
-  197 unit tests.
+  212 unit tests.
 
 ## Architecture
 
@@ -90,7 +96,8 @@ locally on CPU; generation uses the Google Gemini free tier.
 | `rag.py` | The pipeline: condense → retrieve → gate → generate → verify citations, conflicts and numbers. |
 | `grounding.py` | The number check: compares every number in the answer, by value (`8,6` = `8.6`, `13.000` = `13,000`), with the passages it cites. |
 | `generator.py` | Gemini client. Retries 429/5xx and dropped TLS connections on fresh clients, and fails fast when the daily quota is exhausted. |
-| `app.py` | Streamlit chat UI: cited answers, conflict and unsupported-number warnings, source inspector (which retriever found each chunk and its rerank score), document upload and delete. |
+| `web/` | The web front end, served by the API at `/`: chat, an evidence panel with every cited passage and tool result, the process assessment as cards, analytics. Plain HTML, CSS and JavaScript; the model's text is escaped and a strict Content-Security-Policy applies. |
+| `app.py` | Streamlit UI for local use: cited answers, conflict and unsupported-number warnings, source inspector (which retriever found each chunk and its rerank score), document upload and delete. |
 | `api.py` | FastAPI: `/ask`, `/search` (with `?mode=` to compare retrievers), `/documents` (GET/POST/DELETE), `/stats`, `/health`. |
 | `failure_rules.py` | The documented failure rules as code: assesses one process, with margins to every threshold. Tested against all 10,000 rows of the AI4I dataset. |
 | `copilot_tools.py` · `process_data.py` | The copilot's tools: the failure rules on given readings, the AI4I data in Postgres behind fixed SQL queries, and a pgvector search for similar recorded processes. |
@@ -514,7 +521,7 @@ copy .env.example .env                    # macOS/Linux: cp; then set GEMINI_API
 streamlit run app.py                      # chat UI
 python rag.py "Takım değişimi nasıl yapılır?"
 python vector_store.py "HDF"              # retrieval only: no LLM, no API key
-uvicorn api:app --reload                  # API, docs at /docs
+uvicorn api:app --reload                  # web front end at http://localhost:8000, API docs at /docs
 ```
 
 The first query downloads the embedding model and the reranker (~1 GB in
@@ -585,7 +592,7 @@ first connection, or explicitly with `python -m db.migrate`.
 
 ```bash
 pip install -r requirements-dev.txt
-pytest                                       # 197 tests, ~25 s, offline (41 need TEST_DATABASE_URL)
+pytest                                       # 212 tests, ~35 s, offline (41 need TEST_DATABASE_URL)
 python -m evals.retrieval_eval               # retriever comparison (offline, free)
 python -m evals.retrieval_eval --mode hybrid_rerank   # per-question detail
 python -m evals.gate_eval                    # off-topic gate comparison (offline, free)
@@ -684,7 +691,7 @@ right section was never retrieved, or the model didn't use it.
 ├── process_data.py         the AI4I data in Postgres: fixed SQL queries, nearest neighbours
 ├── ai4i/                   the AI4I 2020 dataset (CC BY 4.0)
 ├── evals/                  retrieval, gate, answer and failure-model evals, results/
-├── tests/                  197 tests
+├── tests/                  212 tests
 ├── Dockerfile · docker-compose.yml   local images (UI + API)
 ├── deploy/Dockerfile       the cloud image (API only)
 └── .github/workflows/ci.yml

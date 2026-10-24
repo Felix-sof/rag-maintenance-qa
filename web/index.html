@@ -1,0 +1,126 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Maintenance Copilot</title>
+  <meta name="description" content="Grounded answers about a milling machine: maintenance documents, failure rules and 10,000 recorded processes, every fact cited.">
+  <link rel="icon" href="favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="app.css">
+  <script src="app.js" defer></script>
+</head>
+<body>
+  <header class="topbar">
+    <a class="brand" href="#copilot" aria-label="Maintenance Copilot home">
+      <svg class="brand-mark" viewBox="0 0 32 32" aria-hidden="true">
+        <rect width="32" height="32" rx="8" class="brand-mark-bg"/>
+        <path d="M9 21.5 14.2 16.3M18.6 11.9a3.8 3.8 0 1 0 1.5 6.3l2.4 2.4 1.5-1.5-2.4-2.4a3.8 3.8 0 0 0-3-4.8Z" class="brand-mark-fg"/>
+        <circle cx="9" cy="21.5" r="1.6" class="brand-mark-dot"/>
+      </svg>
+      <span class="brand-name">Maintenance Copilot</span>
+    </a>
+    <nav class="nav" aria-label="Sections">
+      <a href="#copilot" data-view="copilot">Copilot</a>
+      <a href="#analytics" data-view="analytics">Analytics</a>
+      <a href="#about" data-view="about">How it works</a>
+    </nav>
+    <div class="status" id="status" aria-live="polite">
+      <span class="status-dot"></span><span class="status-text">Connecting…</span>
+    </div>
+  </header>
+
+  <main>
+    <!-- Copilot -->
+    <section class="view view-copilot" id="view-copilot" aria-label="Copilot">
+      <div class="conversation">
+        <div class="thread" id="thread" aria-live="polite">
+          <div class="empty" id="empty">
+            <p class="eyebrow">Milling-machine maintenance</p>
+            <h1>Ask about failures, procedures and your machine's readings.</h1>
+            <p class="lede">Answers come only from the plant's maintenance documents, the documented failure rules and
+              10,000 recorded processes. Every fact links to its source, and every number is checked against it.</p>
+            <div class="suggestions" id="suggestions">
+              <button class="suggestion" type="button" data-question="Type L product: air 300 K, process 308.4 K, 1300 rpm, 45 Nm, tool wear 120 min. Is there a failure risk?">
+                <span class="suggestion-kicker">Risk assessment</span>
+                <span class="suggestion-text">Type L, 300 K / 308.4 K, 1300 rpm, 45 Nm, 120 min wear: any failure risk?</span>
+              </button>
+              <button class="suggestion" type="button" data-question="Under which conditions does a heat dissipation failure (HDF) occur?">
+                <span class="suggestion-kicker">Failure modes</span>
+                <span class="suggestion-text">Under which conditions does a heat dissipation failure occur?</span>
+              </button>
+              <button class="suggestion" type="button" data-question="Which product type has the highest failure rate in the recorded data?">
+                <span class="suggestion-kicker">Recorded data</span>
+                <span class="suggestion-text">Which product type has the highest failure rate in the recorded data?</span>
+              </button>
+              <button class="suggestion" type="button" data-question="How is the cutting tool replaced? List the steps.">
+                <span class="suggestion-kicker">Procedures</span>
+                <span class="suggestion-text">How is the cutting tool replaced? List the steps.</span>
+              </button>
+            </div>
+          </div>
+        </div>
+
+        <form class="composer" id="composer" autocomplete="off">
+          <label class="visually-hidden" for="question">Your question</label>
+          <textarea id="question" name="question" rows="1" maxlength="500"
+            placeholder="Ask in English or Turkish — e.g. readings, a failure mode, a procedure"></textarea>
+          <button class="send" id="send" type="submit" aria-label="Send">
+            <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M3.5 10h11M10.5 5l5 5-5 5"/></svg>
+          </button>
+          <div class="composer-meta">
+            <span>Grounded in the knowledge base · verify before acting on an answer</span>
+            <span id="counter">0 / 500</span>
+          </div>
+        </form>
+      </div>
+
+      <aside class="inspector" id="inspector" aria-label="Evidence">
+        <div class="inspector-head">
+          <h2>Evidence</h2>
+          <p id="inspector-sub">Sources and tool results for the selected answer.</p>
+        </div>
+        <div class="inspector-body" id="inspector-body">
+          <div class="inspector-empty">
+            <p>Ask a question to see the passages and tool results the answer is built on.</p>
+          </div>
+        </div>
+      </aside>
+    </section>
+
+    <!-- Analytics -->
+    <section class="view view-page" id="view-analytics" aria-label="Analytics" hidden>
+      <div class="page-head">
+        <p class="eyebrow">Query log · PostgreSQL</p>
+        <h1>Analytics</h1>
+        <p class="lede">Every question is logged to Postgres. These figures come from the SQL queries in
+          <code>analytics/</code>, over the last 30 days.</p>
+      </div>
+      <div id="analytics-body"><p class="muted">Loading…</p></div>
+    </section>
+
+    <!-- How it works -->
+    <section class="view view-page" id="view-about" aria-label="How it works" hidden>
+      <div class="page-head">
+        <p class="eyebrow">Architecture</p>
+        <h1>How it works</h1>
+        <p class="lede">A retrieval-augmented assistant that can also call tools: the documented failure rules, and
+          SQL over the recorded processes. Each claim below is measured; the evaluations are in the repository.</p>
+      </div>
+      <div class="kpis">
+        <div class="kpi"><span class="kpi-value">0.942</span><span class="kpi-label">retrieval MRR on hard questions, hybrid + rerank (vectors alone: 0.786)</span></div>
+        <div class="kpi"><span class="kpi-value">308 / 308</span><span class="kpi-label">HDF, PWF and OSF labels reproduced by the documented rules, 0 false alarms</span></div>
+        <div class="kpi"><span class="kpi-value">0 / 75</span><span class="kpi-label">in-scope questions wrongly refused by the off-topic gate</span></div>
+        <div class="kpi"><span class="kpi-value">≤ 2</span><span class="kpi-label">model rounds per answer, tool calls included (a follow-up adds one to rewrite it)</span></div>
+      </div>
+      <div class="steps">
+        <div class="step"><span class="step-n">1</span><div><h3>Retrieve</h3><p>Dense vectors (multilingual-e5) and BM25, fused with Reciprocal Rank Fusion and re-ranked by a cross-encoder. The index lives in PostgreSQL with pgvector.</p></div></div>
+        <div class="step"><span class="step-n">2</span><div><h3>Gate</h3><p>A question whose best match is too weak is refused before any LLM call. Questions with sensor readings go to the tools instead.</p></div></div>
+        <div class="step"><span class="step-n">3</span><div><h3>Reason with tools</h3><p>Through Gemini function calling, the model can apply the failure rules to the given readings, find the most similar recorded processes with pgvector, or run a fixed SQL query. It never writes SQL itself.</p></div></div>
+        <div class="step"><span class="step-n">4</span><div><h3>Verify</h3><p>Each answer cites passages as [n] and tool results as [T1]. Every number in it is checked against the cited sources, and conflicting documents are flagged rather than silently resolved.</p></div></div>
+      </div>
+      <p class="fineprint">The reference documents and the 10,000 recorded processes come from the AI4I 2020 Predictive Maintenance Dataset
+        (S. Matzka, CC BY 4.0), which is synthetic. The procedure documents are illustrative, not a manufacturer's manual.</p>
+    </section>
+  </main>
+</body>
+</html>

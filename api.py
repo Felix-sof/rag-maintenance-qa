@@ -12,6 +12,7 @@ DELETE /documents/{source}  delete an uploaded document (uploads/ only) and re-i
 GET    /health              index stats
 GET    /stats               query-log analytics: daily volume, refusal rate, latency, top documents
                             (needs DATABASE_URL; the SQL is in analytics/)
+GET    /                    the web front end (web/): chat, evidence panel, analytics
 
 For a public deployment:
     READ_ONLY=1     uploads and deletes are refused; the documents are those the
@@ -29,7 +30,10 @@ from contextlib import asynccontextmanager
 from datetime import date
 from typing import Literal, Optional
 
+from pathlib import Path
+
 from fastapi import Depends, FastAPI, File, Form, HTTPException, Query, Request, UploadFile
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 import analytics
@@ -69,6 +73,32 @@ app = FastAPI(
     description="Question answering over a milling-machine maintenance knowledge base, with cited sources.",
     lifespan=lifespan,
 )
+WEB_DIR = Path(__file__).parent / "web"
+
+# The front end renders text the model wrote. It escapes it, and this policy is the
+# second line: only the page's own scripts and styles run, it can only talk to this
+# API, and no other site can frame it. /docs is left out: Swagger UI loads from a CDN.
+CONTENT_SECURITY_POLICY = (
+    "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; "
+    "connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'"
+)
+SECURITY_HEADERS = {
+    "X-Content-Type-Options": "nosniff",
+    "Referrer-Policy": "no-referrer",
+    "X-Frame-Options": "DENY",
+}
+
+
+@app.middleware("http")
+async def security_headers(request: Request, call_next):
+    response = await call_next(request)
+    for name, value in SECURITY_HEADERS.items():
+        response.headers.setdefault(name, value)
+    if not request.url.path.startswith(("/docs", "/redoc", "/openapi.json")):
+        response.headers.setdefault("Content-Security-Policy", CONTENT_SECURITY_POLICY)
+    return response
+
+
 limiter = RateLimiter()  # /ask: it calls the LLM
 light_limiter = RateLimiter(per_minute=60, per_day=5_000)  # everything else costs CPU or a database query
 
@@ -222,3 +252,7 @@ def delete_document(source: str) -> dict:
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return {"deleted": source}
+
+
+# Last, so that every API route above takes precedence over a file of the same name.
+app.mount("/", StaticFiles(directory=WEB_DIR, html=True), name="web")
