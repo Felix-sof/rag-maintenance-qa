@@ -227,7 +227,7 @@ def test_analytics_page_renders(seeded, monkeypatch):
     monkeypatch.setattr(query_log, "_log", seeded)
     page = AppTest.from_file("../pages/analytics.py", default_timeout=30).run()
     assert not page.exception
-    assert [m.label for m in page.metric][:2] == ["Soru (son 30 gün)", "Reddetme oranı"]
+    assert [m.label for m in page.metric][:2] == ["Questions (last 30 days)", "Refusal rate"]
     assert page.metric[1].value == "40%"
 
 
