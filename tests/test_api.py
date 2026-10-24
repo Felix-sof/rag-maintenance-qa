@@ -163,3 +163,21 @@ def test_the_copilot_tools_can_be_switched_off(client, monkeypatch):
     monkeypatch.setattr(rag, "answer", lambda question, history, top_k, tools=None: seen.update(tools=tools) or {})
     client.post("/ask", json={"question": "HDF?"})
     assert seen == {"tools": None}
+
+
+def test_the_web_front_end_is_served_with_a_strict_policy(client):
+    page = client.get("/")
+    assert page.status_code == 200 and "<title>Maintenance Copilot</title>" in page.text
+    policy = page.headers["Content-Security-Policy"]
+    assert "script-src 'self'" in policy and "frame-ancestors 'none'" in policy
+    assert page.headers["X-Content-Type-Options"] == "nosniff"
+    assert client.get("/app.js").headers["content-type"].startswith(("application/javascript", "text/javascript"))
+
+
+def test_api_routes_win_over_static_files(client):
+    assert client.get("/health").json()["status"] == "ok"
+
+
+def test_swagger_ui_keeps_working_without_the_policy(client):
+    docs = client.get("/docs")
+    assert docs.status_code == 200 and "Content-Security-Policy" not in docs.headers

@@ -54,6 +54,7 @@ COPY db/ db/
 COPY analytics/ analytics/
 COPY knowledge/ knowledge/
 COPY ai4i/ ai4i/
+COPY web/ web/
 RUN useradd --create-home app && chown -R app /app
 USER app
 EXPOSE 8080
