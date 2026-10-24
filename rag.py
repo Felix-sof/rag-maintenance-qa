@@ -55,6 +55,7 @@ MIN_SCORE = 0.80
 MIN_RERANK_SCORE = -5.0
 
 NO_ANSWER = "Bilgi bankasında bu sorunun cevabı yok."
+ERROR_PREFIX = "Cevap üretilemedi:"
 CONFLICT_MARKER = "⚠️ Çelişki:"
 
 SYSTEM_PROMPT = f"""You are a maintenance assistant for a milling machine. You answer
@@ -277,7 +278,7 @@ def answer(
         )
         return result
     except GenerationError as exc:
-        result["answer"] = f"Cevap üretilemedi: {exc}"
+        result["answer"] = f"{ERROR_PREFIX} {exc}"
         result["error"] = True
         result["outcome"] = "error"
         return result

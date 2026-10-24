@@ -107,5 +107,27 @@ def test_the_chat_ui_shows_the_tool_calls(monkeypatch):
     page = AppTest.from_file("../app.py", default_timeout=30).run()
     page.chat_input[0].set_value("L tipi, 300 K, 308.4 K, 1300 rpm, 45 Nm, 120 dk: risk?").run()
     assert not page.exception
-    assert any("Araç çağrıları (2)" in e.label for e in page.expander)
+    assert any("Tool calls (2)" in e.label for e in page.expander)
     assert len(page.dataframe) == 2  # the assessment table and the query's rows
+
+
+def test_the_page_shows_refusals_and_errors_in_english(monkeypatch):
+    from streamlit.testing.v1 import AppTest
+
+    def canned(answer, error=False):
+        return {
+            "question": "q", "search_query": "q", "answer": answer, "sources": [], "cited": [], "tool_calls": [],
+            "cited_tools": [], "conflict": False, "unsupported_numbers": [], "error": error,
+            "outcome": "error" if error else "refused_gate",
+        }
+
+    for result, shown in (
+        (canned(rag.NO_ANSWER), "The knowledge base doesn't answer this question."),
+        (canned(f"{rag.ERROR_PREFIX} Gemini quota exhausted", error=True), "Couldn't generate an answer: Gemini quota exhausted"),
+    ):
+        monkeypatch.setattr(rag, "answer", lambda *args, _result=result, **kwargs: _result)
+        page = AppTest.from_file("../app.py", default_timeout=30).run()
+        page.chat_input[0].set_value("Pizza?").run()
+        assert not page.exception
+        texts = [m.value for m in page.markdown] + [e.value for e in page.error]
+        assert shown in texts, texts
